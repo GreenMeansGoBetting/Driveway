@@ -537,6 +537,29 @@ async function renderLive(app){
   if(box.canFinalize){
     scoreCard.appendChild(el("div",{class:"badge", style:"margin-top:10px; color:#d1fae5; border-color: rgba(34,197,94,.35); background: rgba(34,197,94,.10);", html:"Game can be finalized"}));
   }
+
+  // Recent events (last 3)
+  const statLabel=(s)=>{
+    const map={
+      "2PM":"2PT MAKE","2PMISS":"2PT MISS",
+      "3PM":"3PT MAKE","3PMISS":"3PT MISS",
+      "AST":"AST","OREB":"OREB","DREB":"DREB","STL":"STL","BLK":"BLK"
+    };
+    return map[s]||s;
+  };
+  const recent = evs.slice(-3).reverse();
+  const recentWrap = el("div",{style:"margin-top:10px;"});
+  recentWrap.appendChild(el("div",{class:"small-note", html:"Last actions"}));
+  if(!recent.length){
+    recentWrap.appendChild(el("div",{class:"mini", style:"opacity:.75", html:"—"}));
+  } else {
+    for(const e of recent){
+      const when = (e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "");
+      recentWrap.appendChild(el("div",{class:"mini", style:"padding:0; margin-top:4px;", html:`${when ? "<span style=\"opacity:.6\">"+when+"</span> " : ""}<b>${name(e.player_id)}</b> • ${statLabel(e.stat_type)}`}));
+    }
+  }
+  scoreCard.appendChild(recentWrap);
+
   app.appendChild(scoreCard);
 
   const grid=el("div",{class:"grid4"});
@@ -1204,7 +1227,7 @@ async function _longestWinStreaks(gamesChrono){
   return best;
 }
 
-async async function showPlayerModal(player_id){
+async function showPlayerModal(player_id){
   const playersAll=await DB.listPlayers(false);
   const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
   const p=playersById.get(player_id);
