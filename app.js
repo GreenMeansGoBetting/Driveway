@@ -574,59 +574,226 @@ async function renderRecap(app){
 }
 
 async function renderDashboard(app){
-  const games=await DB.listGamesForSeason(state.season.season_id, true);
-  const playersAll=await DB.listPlayers(false);
-  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
-  const name=(id)=>playersById.get(id)?.name||"—";
+  const gamesFinal = await DB.listGamesForSeason(state.season.season_id, true);
+  // Use chronological order for streak/Elo
+  const gamesChrono = [...gamesFinal].sort((a,b)=>a.played_at.localeCompare(b.played_at));
 
-  const totals=new Map();
-  const init=()=>({GP:0,W:0,L:0, PTS:0, AST:0, OREB:0, DREB:0, STL:0, BLK:0, twoM:0,twoA:0, threeM:0,threeA:0});
-  for(const g of games){
-    const evs=await DB.listEventsForGame(g.game_id);
-    const box=computeFromEvents(g, evs);
-    const sideMap=new Map();
-    for(const pid of g.sideA_player_ids) sideMap.set(pid,"A");
-    for(const pid of g.sideB_player_ids) sideMap.set(pid,"B");
-    const winner=g.winner_side;
+  const playersAll = await DB.listPlayers(false);
+  const playersById = new Map(playersAll.map(p=>[p.player_id,p]));
+  const name = (id)=>playersById.get(id)?.name||"—";
 
-    for(const pid of [...g.sideA_player_ids, ...g.sideB_player_ids]){
-      if(!totals.has(pid)) totals.set(pid, init());
-      const t=totals.get(pid);
-      const side=sideMap.get(pid);
+  // Helpers
+  const initTotals = ()=>({GP:0,W:0,L:0, PTS:0, AST:0, OREB:0, DREB:0, STL:0, BLK:0, twoM:0,twoA:0, threeM:0,threeA:0});
+  const totals = new Map();
+  const streak = new Map(); // pid -> {type:'W'|'L'|null, n:int}
+  const elo = new Map(); // pid -> rating
+  const ELO_START = 1000;
+  const K_BASE = 20;
+
+  const getElo = (pid)=> elo.has(pid) ? elo.get(pid) : (elo.set(pid, ELO_START), ELO_START);
+  const setElo = (pid, v)=> elo.set(pid, v);
+
+  // Pair aggregations
+  const teammate = new Map(); // key sorted pid1|pid2 -> {GP,W,L, pts_for, pts_against, margin_sum}
+  const head2head = new Map(); // key sorted pid1|pid2 -> anchored {a, b, aWins, bWins, games, margin_sum_from_a}
+
+  const pairKey = (a,b)=> [a,b].sort().join("|");
+
+  // Compute season totals, streaks, pair stats, Elo
+  for (const g of gamesChrono){
+    const evs = await DB.listEventsForGame(g.game_id);
+    const box = computeFromEvents(g, evs);
+
+    const sideMap = new Map();
+    for (const pid of g.sideA_player_ids) sideMap.set(pid,"A");
+    for (const pid of g.sideB_player_ids) sideMap.set(pid,"B");
+    const winner = g.winner_side;
+
+    // Score + margin
+    const scoreA = box.scoreA;
+    const scoreB = box.scoreB;
+    const margin = Math.abs(scoreA - scoreB);
+    const winnerScore = Math.max(scoreA, scoreB);
+
+    // --- Elo update (team-based) ---
+    const teamA = g.sideA_player_ids;
+    const teamB = g.sideB_player_ids;
+    const eloA = teamA.reduce((s,p)=>s+getElo(p),0)/teamA.length;
+    const eloB = teamB.reduce((s,p)=>s+getElo(p),0)/teamB.length;
+
+    const expectedA = 1 / (1 + Math.pow(10, (eloB - eloA)/400));
+    const actualA = (winner === "A") ? 1 : 0;
+
+    // Margin multiplier: larger margin increases update, capped to avoid huge swings.
+    const marginMult = Math.min(2.0, 1 + (margin / 10));
+    // Mild score multiplier (winning 40-38 is a little "tougher" than 40-20)
+    const scoreMult = Math.min(1.5, 1 + (winnerScore / 100));
+    const K = K_BASE * marginMult * scoreMult;
+
+    const deltaA = K * (actualA - expectedA);
+    const deltaB = -deltaA;
+
+    for (const pid of teamA) setElo(pid, getElo(pid) + deltaA);
+    for (const pid of teamB) setElo(pid, getElo(pid) + deltaB);
+
+    // --- Totals + streak ---
+    for (const pid of [...teamA, ...teamB]){
+      if (!totals.has(pid)) totals.set(pid, initTotals());
+      if (!streak.has(pid)) streak.set(pid, {type:null, n:0});
+      const t = totals.get(pid);
+      const s = streak.get(pid);
+
+      const side = sideMap.get(pid);
       t.GP += 1;
-      if(side===winner) t.W += 1; else t.L += 1;
-      const line=box.lines.get(pid);
-      const d=box.derived(pid);
-      t.PTS += d.pts; t.AST += line["AST"]; t.OREB += line["OREB"]; t.DREB += line["DREB"]; t.STL += line["STL"]; t.BLK += line["BLK"];
-      t.twoM += line["2PM"]; t.twoA += d.twoA; t.threeM += line["3PM"]; t.threeA += d.threeA;
+      const isWin = (side === winner);
+      if (isWin) t.W += 1; else t.L += 1;
+
+      const curType = isWin ? "W" : "L";
+      if (s.type === curType) s.n += 1;
+      else { s.type = curType; s.n = 1; }
+
+      const line = box.lines.get(pid);
+      const d = box.derived(pid);
+      t.PTS += d.pts;
+      t.AST += line["AST"];
+      t.OREB += line["OREB"];
+      t.DREB += line["DREB"];
+      t.STL += line["STL"];
+      t.BLK += line["BLK"];
+      t.twoM += line["2PM"]; t.twoA += d.twoA;
+      t.threeM += line["3PM"]; t.threeA += d.threeA;
+    }
+
+    // --- Teammate chemistry ---
+    const addTeammatePair = (p1,p2, didWin, ptsFor, ptsAgainst, marginSigned)=>{
+      const k = pairKey(p1,p2);
+      if (!teammate.has(k)) teammate.set(k, {GP:0,W:0,L:0, pts_for:0, pts_against:0, margin_sum:0});
+      const r = teammate.get(k);
+      r.GP += 1;
+      if (didWin) r.W += 1; else r.L += 1;
+      r.pts_for += ptsFor;
+      r.pts_against += ptsAgainst;
+      r.margin_sum += marginSigned;
+    };
+    addTeammatePair(teamA[0], teamA[1], winner==="A", scoreA, scoreB, (winner==="A"? +margin : -margin));
+    addTeammatePair(teamB[0], teamB[1], winner==="B", scoreB, scoreA, (winner==="B"? +margin : -margin));
+
+    // --- Head-to-head (opponents) ---
+    const addH2H = (p,q, pWon, marginSigned)=>{
+      const k = pairKey(p,q);
+      if (!head2head.has(k)) head2head.set(k, {a:null, b:null, aWins:0, bWins:0, games:0, margin_sum_from_a:0});
+      const r = head2head.get(k);
+      const [lo, hi] = [p,q].sort();
+      r.a = lo; r.b = hi;
+      const pIsLo = (p === lo);
+      r.games += 1;
+      if (pWon) {
+        if (pIsLo) r.aWins += 1; else r.bWins += 1;
+        r.margin_sum_from_a += pIsLo ? +marginSigned : -marginSigned;
+      } else {
+        if (pIsLo) r.bWins += 1; else r.aWins += 1;
+        r.margin_sum_from_a += pIsLo ? -marginSigned : +marginSigned;
+      }
+    };
+    for (const a of teamA){
+      for (const b of teamB){
+        addH2H(a,b, winner==="A", margin);
+      }
     }
   }
 
-  const rows=[];
-  for(const [pid,t] of totals.entries()){
-    const reb=t.OREB+t.DREB;
-    const twoPct=t.twoA? (t.twoM/t.twoA): null;
-    const threePct=t.threeA? (t.threeM/t.threeA): null;
+  // Build player rows
+  const rows = [];
+  for (const [pid,t] of totals.entries()){
+    const reb = t.OREB + t.DREB;
+    const twoPct = t.twoA ? (t.twoM/t.twoA) : null;
+    const threePct = t.threeA ? (t.threeM/t.threeA) : null;
+    const st = streak.get(pid) || {type:null,n:0};
     rows.push({
-      player:name(pid), GP:t.GP, WL:`${t.W}-${t.L}`,
-      ppg:(t.GP? t.PTS/t.GP:0), rpg:(t.GP? reb/t.GP:0), apg:(t.GP? t.AST/t.GP:0),
-      spg:(t.GP? t.STL/t.GP:0), bpg:(t.GP? t.BLK/t.GP:0),
-      twoPct, threePct
+      pid,
+      player: name(pid),
+      GP: t.GP,
+      WL: `${t.W}-${t.L}`,
+      streak: st.type ? `${st.type}${st.n}` : "—",
+      elo: getElo(pid),
+      ppg: (t.GP ? t.PTS/t.GP : 0),
+      rpg: (t.GP ? reb/t.GP : 0),
+      apg: (t.GP ? t.AST/t.GP : 0),
+      spg: (t.GP ? t.STL/t.GP : 0),
+      bpg: (t.GP ? t.BLK/t.GP : 0),
+      twoPct,
+      threePct
     });
   }
-  rows.sort((a,b)=>b.ppg-a.ppg);
 
-  const c=el("div",{class:"card section"});
-  c.appendChild(el("div",{class:"h1", html:`Dashboard • ${state.season.name}`}));  
-  c.appendChild(el("div",{class:"p", html:`Games: <b>${games.length}</b> • Cloud: tap <b>Sync</b> to back up / restore across devices.`}));
+  // Controls & sorts
+  const sortMode = state._dashSort || "elo";
+  const winPct = (r)=>{
+    const [w,l] = r.WL.split("-").map(x=>Number(x));
+    return (w+l) ? (w/(w+l)) : 0;
+  };
+  const streakVal = (s)=>{
+    if (!s || s==="—") return 0;
+    const t = s[0];
+    const n = Number(s.slice(1))||0;
+    return (t==="W") ? n : -n;
+  };
+  if (sortMode==="ppg") rows.sort((a,b)=>b.ppg-a.ppg);
+  else if (sortMode==="wl") rows.sort((a,b)=>winPct(b)-winPct(a));
+  else if (sortMode==="streak") rows.sort((a,b)=>streakVal(b.streak)-streakVal(a.streak));
+  else if (sortMode==="gp") rows.sort((a,b)=>b.GP-a.GP);
+  else rows.sort((a,b)=>b.elo-a.elo);
 
-  const tbl=el("table",{class:"table", style:"margin-top:12px;"});
-  tbl.appendChild(el("thead",{html:"<tr><th>Player</th><th>GP</th><th>W-L</th><th>PTS/G</th><th>REB/G</th><th>AST/G</th><th>STL/G</th><th>BLK</th><th>2P%</th><th>3P%</th></tr>"}));
-  const tb=el("tbody",{});
-  const pct=(x)=> x===null? "—" : (x*100).toFixed(0)+"%";
-  for(const r of rows){
-    const tr=el("tr",{});
+  const pctClass = (x)=>{
+    if (x===null) return "";
+    if (x>=0.55) return "pct-good";
+    if (x>=0.40) return "pct-ok";
+    return "pct-bad";
+  };
+  const pctText = (x)=> x===null ? "—" : (x*100).toFixed(0)+"%";
+
+  const closeMargin = state._closeMargin || 5;
+
+  // --- Main card ---
+  const c = el("div",{class:"card section"});
+  c.appendChild(el("div",{class:"h1", html:`Dashboard • ${state.season.name}`}));
+  c.appendChild(el("div",{class:"p", html:`Games: <b>${gamesFinal.length}</b> • Close games (≤${closeMargin}): <b>${gamesFinal.filter(g=>Math.abs(g.final_score_a-g.final_score_b)<=closeMargin).length}</b>`}));
+  c.appendChild(el("div",{class:"small-note", html:`Elo: team strength adjusts for opponent strength automatically; updates scale with margin (cap 2.0x) and mildly with score.`}));
+
+  const controls = el("div",{class:"controls", style:"margin-top:10px;"});
+  const sortSel = el("select",{class:"input"});
+  sortSel.innerHTML = `
+    <option value="elo">Sort: Elo</option>
+    <option value="ppg">Sort: PTS/G</option>
+    <option value="wl">Sort: Win %</option>
+    <option value="streak">Sort: Streak</option>
+    <option value="gp">Sort: Games Played</option>
+  `;
+  sortSel.value = sortMode;
+  sortSel.onchange = ()=>{ state._dashSort = sortSel.value; render(); };
+  controls.appendChild(sortSel);
+
+  const marginSel = el("select",{class:"input"});
+  marginSel.innerHTML = `
+    <option value="5">Close games: ≤ 5</option>
+    <option value="4">Close games: ≤ 4</option>
+    <option value="3">Close games: ≤ 3</option>
+    <option value="2">Close games: ≤ 2</option>
+  `;
+  marginSel.value = String(closeMargin);
+  marginSel.onchange = ()=>{ state._closeMargin = Number(marginSel.value); render(); };
+  controls.appendChild(marginSel);
+
+  c.appendChild(controls);
+
+  const tbl = el("table",{class:"table", style:"margin-top:12px;"});
+  tbl.appendChild(el("thead",{html:"<tr><th>Player</th><th>Elo</th><th>Streak</th><th>GP</th><th>W-L</th><th>PTS/G</th><th>REB/G</th><th>AST/G</th><th>STL/G</th><th>BLK</th><th>2P%</th><th>3P%</th></tr>"}));
+  const tb = el("tbody",{});
+  for (const r of rows){
+    const tr = el("tr",{});
     tr.appendChild(el("td",{html:`<b>${r.player}</b>`}));
+    tr.appendChild(el("td",{html:r.elo.toFixed(0)}));
+    tr.appendChild(el("td",{html:`<b>${r.streak}</b>`}));
     tr.appendChild(el("td",{html:r.GP}));
     tr.appendChild(el("td",{html:r.WL}));
     tr.appendChild(el("td",{html:r.ppg.toFixed(1)}));
@@ -634,35 +801,162 @@ async function renderDashboard(app){
     tr.appendChild(el("td",{html:r.apg.toFixed(1)}));
     tr.appendChild(el("td",{html:r.spg.toFixed(1)}));
     tr.appendChild(el("td",{html:r.bpg.toFixed(1)}));
-    tr.appendChild(el("td",{html:pct(r.twoPct)}));
-    tr.appendChild(el("td",{html:pct(r.threePct)}));
+    tr.appendChild(el("td",{html:`<span class="${pctClass(r.twoPct)}">${pctText(r.twoPct)}</span>`}));
+    tr.appendChild(el("td",{html:`<span class="${pctClass(r.threePct)}">${pctText(r.threePct)}</span>`}));
     tb.appendChild(tr);
   }
   tbl.appendChild(tb);
   c.appendChild(tbl);
+  app.appendChild(c);
 
-  const log=el("div",{class:"card section", style:"margin-top:12px;"});
-  log.appendChild(el("div",{class:"h2", html:"Game Log"}));
-  if(!games.length) log.appendChild(el("div",{class:"p", html:"No finalized games yet."}));
-  else{
-    const lt=el("table",{class:"table"});
-    lt.appendChild(el("thead",{html:"<tr><th>Date</th><th>Matchup</th><th>Final</th></tr>"}));
-    const ltb=el("tbody",{});
-    for(const g of games.slice(0,25)){
-      const [a1,a2]=g.sideA_player_ids, [b1,b2]=g.sideB_player_ids;
-      const matchup=`${name(a1)} + ${name(a2)} vs ${name(b1)} + ${name(b2)}`;
-      const tr=el("tr",{});
-      tr.style.cursor="pointer";
-      tr.onclick=()=>{ state.currentGame=g; setRoute("recap"); };
+  // --- Close Games ---
+  const closeGames = gamesFinal
+    .filter(g=>Math.abs(g.final_score_a-g.final_score_b) <= closeMargin)
+    .sort((a,b)=>b.played_at.localeCompare(a.played_at))
+    .slice(0, 25);
+
+  const closeCard = el("div",{class:"card section", style:"margin-top:12px;"});
+  closeCard.appendChild(el("div",{class:"h2", html:`Close Games (≤ ${closeMargin})`}));
+  if (!closeGames.length) closeCard.appendChild(el("div",{class:"p", html:"No close games yet."}));
+  else {
+    const lt = el("table",{class:"table"});
+    lt.appendChild(el("thead",{html:"<tr><th>Date</th><th>Matchup</th><th>Final</th><th>Margin</th></tr>"}));
+    const ltb = el("tbody",{});
+    for (const g of closeGames){
+      const [a1,a2] = g.sideA_player_ids, [b1,b2] = g.sideB_player_ids;
+      const matchup = `${name(a1)} + ${name(a2)} vs ${name(b1)} + ${name(b2)}`;
+      const mg = Math.abs(g.final_score_a - g.final_score_b);
+      const tr = el("tr",{});
       tr.appendChild(el("td",{html:g.played_at.slice(0,10)}));
       tr.appendChild(el("td",{html:matchup}));
       tr.appendChild(el("td",{html:`${g.final_score_a} — ${g.final_score_b} (W: ${g.winner_side})`}));
+      tr.appendChild(el("td",{html:`${mg}`}));
+      ltb.appendChild(tr);
+    }
+    lt.appendChild(ltb);
+    closeCard.appendChild(lt);
+  }
+  app.appendChild(closeCard);
+
+  // --- Head-to-head ---
+  const h2hCard = el("div",{class:"card section", style:"margin-top:12px;"});
+  h2hCard.appendChild(el("div",{class:"h2", html:"Head-to-Head"}));
+
+  const pSel1 = el("select",{class:"input"});
+  const pSel2 = el("select",{class:"input"});
+  pSel1.appendChild(el("option",{value:"", html:"Player 1"}));
+  pSel2.appendChild(el("option",{value:"", html:"Player 2"}));
+  for (const p of playersAll.filter(p=>p.active)){
+    pSel1.appendChild(el("option",{value:p.player_id, html:p.name}));
+    pSel2.appendChild(el("option",{value:p.player_id, html:p.name}));
+  }
+  pSel1.value = state._h2h1 || "";
+  pSel2.value = state._h2h2 || "";
+  pSel1.onchange = ()=>{ state._h2h1 = pSel1.value; render(); };
+  pSel2.onchange = ()=>{ state._h2h2 = pSel2.value; render(); };
+
+  const lookupRow = el("div",{class:"controls", style:"margin-top:10px;"});
+  lookupRow.appendChild(pSel1);
+  lookupRow.appendChild(pSel2);
+  h2hCard.appendChild(lookupRow);
+
+  const showH2H = (p,q)=>{
+    if (!p || !q || p===q) return null;
+    const k = pairKey(p,q);
+    const r = head2head.get(k);
+    if (!r) return { text:"No games vs each other yet." };
+    const lo = r.a, hi = r.b;
+    const selectedLo = (p===lo && q===hi);
+    const pWins = selectedLo ? r.aWins : r.bWins;
+    const qWins = selectedLo ? r.bWins : r.aWins;
+    const avgMarginForP = r.games ? (selectedLo ? (r.margin_sum_from_a/r.games) : (-r.margin_sum_from_a/r.games)) : 0;
+    return { text:`<b>${name(p)}</b> vs <b>${name(q)}</b>: <b>${pWins}-${qWins}</b> (Games: ${r.games}) • Avg margin for ${name(p)}: <b>${avgMarginForP.toFixed(1)}</b>` };
+  };
+
+  const h2hRes = showH2H(state._h2h1, state._h2h2);
+  if (h2hRes) h2hCard.appendChild(el("div",{class:"p", style:"margin-top:10px;", html:h2hRes.text}));
+  else h2hCard.appendChild(el("div",{class:"p", style:"margin-top:10px;", html:"Pick two players to see their head-to-head record (only when they were opponents)."}));
+
+  // Top rivalries
+  const rivalRows = [];
+  for (const r of head2head.values()){
+    rivalRows.push({a:r.a,b:r.b,games:r.games,aWins:r.aWins,bWins:r.bWins});
+  }
+  rivalRows.sort((x,y)=> y.games - x.games);
+  const topR = rivalRows.slice(0, 10);
+  if (topR.length){
+    const t = el("table",{class:"table", style:"margin-top:12px;"});
+    t.appendChild(el("thead",{html:"<tr><th>Matchup</th><th>Record</th><th>Games</th></tr>"}));
+    const bdy = el("tbody",{});
+    for (const r of topR){
+      const tr = el("tr",{});
+      tr.appendChild(el("td",{html:`${name(r.a)} vs ${name(r.b)}`}));
+      tr.appendChild(el("td",{html:`${r.aWins}-${r.bWins}`}));
+      tr.appendChild(el("td",{html:r.games}));
+      bdy.appendChild(tr);
+    }
+    t.appendChild(bdy);
+    h2hCard.appendChild(t);
+  }
+  app.appendChild(h2hCard);
+
+  // --- Teammate chemistry ---
+  const teamCard = el("div",{class:"card section", style:"margin-top:12px;"});
+  teamCard.appendChild(el("div",{class:"h2", html:"Teammate Chemistry"}));
+  teamCard.appendChild(el("div",{class:"p", html:"Records when two players were on the same side."}));
+
+  const chem = [];
+  for (const [k,r] of teammate.entries()){
+    const [p1,p2] = k.split("|");
+    const gp = r.GP;
+    const wp = gp ? (r.W/gp) : 0;
+    const avgMargin = gp ? (r.margin_sum/gp) : 0;
+    chem.push({p1,p2,gp, wl:`${r.W}-${r.L}`, wp, avgMargin});
+  }
+  chem.sort((a,b)=> (b.wp - a.wp) || (b.gp - a.gp));
+
+  if (!chem.length) teamCard.appendChild(el("div",{class:"p", html:"No games yet."}));
+  else {
+    const t = el("table",{class:"table", style:"margin-top:12px;"});
+    t.appendChild(el("thead",{html:"<tr><th>Pair</th><th>W-L</th><th>Win%</th><th>GP</th><th>Avg Margin</th></tr>"}));
+    const bdy = el("tbody",{});
+    for (const r of chem.slice(0, 15)){
+      const tr = el("tr",{});
+      tr.appendChild(el("td",{html:`${name(r.p1)} + ${name(r.p2)}`}));
+      tr.appendChild(el("td",{html:r.wl}));
+      tr.appendChild(el("td",{html:(r.wp*100).toFixed(0)+"%"}));
+      tr.appendChild(el("td",{html:r.gp}));
+      tr.appendChild(el("td",{html:r.avgMargin.toFixed(1)}));
+      bdy.appendChild(tr);
+    }
+    t.appendChild(bdy);
+    teamCard.appendChild(t);
+  }
+  app.appendChild(teamCard);
+
+  // --- Game Log ---
+  const log = el("div",{class:"card section", style:"margin-top:12px;"});
+  log.appendChild(el("div",{class:"h2", html:"Game Log"}));
+  if (!gamesFinal.length) log.appendChild(el("div",{class:"p", html:"No finalized games yet."}));
+  else {
+    const lt = el("table",{class:"table"});
+    lt.appendChild(el("thead",{html:"<tr><th>Date</th><th>Matchup</th><th>Final</th><th>Margin</th></tr>"}));
+    const ltb = el("tbody",{});
+    for (const g of [...gamesFinal].sort((a,b)=>b.played_at.localeCompare(a.played_at)).slice(0,25)){
+      const [a1,a2] = g.sideA_player_ids, [b1,b2] = g.sideB_player_ids;
+      const matchup = `${name(a1)} + ${name(a2)} vs ${name(b1)} + ${name(b2)}`;
+      const mg = Math.abs(g.final_score_a - g.final_score_b);
+      const tr = el("tr",{});
+      tr.style.cursor = "pointer";
+      tr.onclick = ()=>{ state.currentGame=g; setRoute("recap"); };
+      tr.appendChild(el("td",{html:g.played_at.slice(0,10)}));
+      tr.appendChild(el("td",{html:matchup}));
+      tr.appendChild(el("td",{html:`${g.final_score_a} — ${g.final_score_b} (W: ${g.winner_side})`}));
+      tr.appendChild(el("td",{html:String(mg)}));
       ltb.appendChild(tr);
     }
     lt.appendChild(ltb);
     log.appendChild(lt);
   }
-
-  app.appendChild(c);
   app.appendChild(log);
 }

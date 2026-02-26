@@ -120,3 +120,7 @@ Commit `config.js` to GitHub.
 - You can still Export Season anytime for CSV/JSON.
 - If you play offline, the app queues changes and will push them on the next Sync.
 
+
+
+## v2 Additions
+- Dashboard: Elo ratings, streaks, head-to-head lookup, teammate chemistry, close-games list, shot% coloring.
