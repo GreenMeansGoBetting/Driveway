@@ -103,6 +103,7 @@ async function init(){
       showModal("Syncing…", "Pushing pending changes to cloud, then refreshing from cloud.", []);
       const up = await sbSyncUp();
       const down = await sbSyncDown();
+      await DB.setSetting("last_sync_at", new Date().toISOString());
       hideModal();
       await updateHeaderSeason();
       render();
@@ -113,24 +114,125 @@ async function init(){
     }
   });
 
-  $("#btnSettings").addEventListener("click", async()=>{
-    const auto=await DB.getSetting("auto_export_finalize", false); // default OFF now
+  
+  $("#btnSignOut").addEventListener("click", async()=>{
+    try{
+      await sbSignOut();
+      await DB.setSetting("last_sync_at", null);
+      setRoute("home");
+      render();
+    } catch(e){
+      showModal("Sign out error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+    }
+  });
+
+$("#btnSettings").addEventListener("click", async()=>{
+    const autoExport=await DB.getSetting("auto_export_finalize", false);
+    const autoSync=await DB.getSetting("auto_sync_finalize", true);
+    const last = await DB.getSetting("last_sync_at", null);
+    const lastTxt = last ? new Date(last).toLocaleString() : "—";
+
+    const h = await sbHealth();
+    const signedIn = h.configured && h.signed_in;
+
     showModal("Settings",
-      `<div class="row" style="justify-content:space-between;">
-        <div><b>Auto-export after Finalize</b><div class="kbd">If ON, downloads exports after each finalized game</div></div>
-        <button class="btn ${auto?"ok":"ghost"}" id="toggleAuto">${auto?"ON":"OFF"}</button>
-      </div>`,
+      `<div class="row" style="justify-content:space-between; align-items:flex-start;">
+        <div>
+          <b>Auto-export after finalize</b><br/>
+          <span class="muted">If enabled, finalize will download game files (optional).</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggleAutoExport" ${autoExport?"checked":""}/>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="row" style="justify-content:space-between; align-items:flex-start;">
+        <div>
+          <b>Auto-sync after finalize</b><br/>
+          <span class="muted">Finalize will automatically push changes to the cloud.</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="toggleAutoSync" ${autoSync?"checked":""}/>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="row" style="justify-content:space-between; align-items:center;">
+        <div>
+          <b>Last sync</b><br/>
+          <span class="muted">${lastTxt}</span>
+        </div>
+        <button class="btn" id="btnSyncNow">Sync now</button>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="row" style="justify-content:space-between; align-items:center;">
+        <div>
+          <b>Backup</b><br/>
+          <span class="muted">Download a full season JSON snapshot (players + games + events).</span>
+        </div>
+        <button class="btn" id="btnBackupSeason">Download backup</button>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="row" style="justify-content:space-between; align-items:center;">
+        <div>
+          <b>Account</b><br/>
+          <span class="muted">${signedIn ? ("Signed in as "+h.email) : "Not signed in"}</span>
+        </div>
+        <button class="btn danger" id="btnSignOutNow" ${signedIn?"":"disabled"}>Sign out</button>
+      </div>
+      `,
       [{label:"Close", kind:"ghost"}]
     );
-    setTimeout(()=>{
-      const t=document.getElementById("toggleAuto");
-      if(!t) return;
-      t.onclick=async()=>{
-        const cur=await DB.getSetting("auto_export_finalize", false);
-        await DB.setSetting("auto_export_finalize", !cur);
+
+    $("#toggleAutoExport").addEventListener("change", async(e)=>{ await DB.setSetting("auto_export_finalize", e.target.checked); });
+    $("#toggleAutoSync").addEventListener("change", async(e)=>{ await DB.setSetting("auto_sync_finalize", e.target.checked); });
+
+    $("#btnSyncNow").addEventListener("click", async()=>{
+      hideModal();
+      $("#btnSync").click();
+    });
+
+    $("#btnBackupSeason").addEventListener("click", async()=>{
+      try{
+        const season = state.season || await DB.ensureDefaultSeason();
+        const players = await DB.listPlayers(false);
+        const games = await DB.listGamesForSeason(season.season_id, null);
+        const events = [];
+        for (const g of games){
+          const evs = await DB.listEventsForGame(g.game_id);
+          for (const e of evs) events.push(e);
+        }
+        const payload = { exported_at: new Date().toISOString(), season, players, games, events };
+        const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
+        const a=document.createElement("a");
+        a.href=URL.createObjectURL(blob);
+        a.download=`driveway_backup_${season.name.replace(/\s+/g,"_")}.json`;
+        document.body.appendChild(a); a.click(); a.remove();
+      } catch(e){
+        showModal("Backup error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+      }
+    });
+
+    $("#btnSignOutNow").addEventListener("click", async()=>{
+      try{
+        await sbSignOut();
+        await DB.setSetting("last_sync_at", null);
         hideModal();
-      };
-    },0);
+        setRoute("home");
+        render();
+      } catch(e){
+        showModal("Sign out error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+      }
+    });
   });
 
   await updateHeaderSeason();
@@ -151,23 +253,26 @@ init();
 
 async function cloudBar(){
   const h = await sbHealth();
+  const last = await DB.getSetting("last_sync_at", null);
+  const lastTxt = last ? new Date(last).toLocaleString() : "—";
+
+  const so = document.getElementById("btnSignOut");
+  if (so) so.style.display = (h.configured && h.signed_in) ? "" : "none";
+
   let dotClass = "dot";
   let text = "Local only";
   if (h.configured && h.signed_in) {
     dotClass = (h.pending_ops===0) ? "dot ok" : "dot warn";
     text = (h.pending_ops===0) ? `Cloud ✓ (${h.email})` : `Cloud pending (${h.pending_ops})`;
+    text += ` • Last sync: ${lastTxt}`;
   } else if (h.configured && !h.signed_in) {
     dotClass = "dot warn";
     text = "Cloud (not signed in)";
-  } else {
-    dotClass = "dot";
-    text = "Cloud not set";
   }
-  const bar = el("div",{class:"cloudbar"});
-  bar.appendChild(el("div",{class:"cloud-pill", html:`<span class="${dotClass}"></span>${text}`}));
-  if (h.configured && !h.signed_in) {
-    bar.appendChild(el("button",{class:"btn ghost", html:"Sign in", onclick:()=>setRoute("login")}));
-  }
+
+  const bar=el("div",{class:"cloud-bar"});
+  bar.appendChild(el("div",{class:dotClass}));
+  bar.appendChild(el("div",{class:"p", html:text}));
   return bar;
 }
 
@@ -184,6 +289,10 @@ async function render(){
   if(state.route==="live") return renderLive(app);
   if(state.route==="recap") return renderRecap(app);
   if(state.route==="dashboard") return renderDashboard(app);
+  if(state.route==="leaderboard") return renderLeaderboard(app);
+  if(state.route==="awards") return renderAwards(app);
+  if(state.route==="records") return renderRecords(app);
+  if(state.route==="draft") return renderDraft(app);
 }
 
 function renderHome(app){
@@ -283,9 +392,11 @@ async function renderPlayers(app){
   const tb=el("tbody",{});
   for(const p of state.players){
     const tr=el("tr",{});
+    tr.style.cursor="pointer";
+    tr.onclick=()=>showPlayerModal(p.player_id);
     tr.appendChild(el("td",{html:`<b>${p.name}</b><div class="kbd">${p.player_id.slice(0,8)}</div>`}));
     const td=el("td",{});
-    td.appendChild(el("button",{class:"btn small ghost", html:"Archive", onclick:async()=>{
+    td.appendChild(el("button",{class:"btn small ghost", html:"Archive", onclick:async(e)=>{ e.stopPropagation();
       p.active=false;
       await DB.updatePlayer(p);
       await DB.enqueueOp("upsert_player", p);
@@ -959,4 +1070,547 @@ async function renderDashboard(app){
     log.appendChild(lt);
   }
   app.appendChild(log);
+}
+
+// ===== v4: Leaderboard / Records / Awards / Draft + Player Career Highs =====
+
+function _pidName(pid, playersById){
+  return playersById.get(pid)?.name || "—";
+}
+
+function _formatVs(opp1, opp2, playersById){
+  return `${_pidName(opp1, playersById)} + ${_pidName(opp2, playersById)}`;
+}
+
+function _formatTeammate(tid, playersById){
+  return _pidName(tid, playersById);
+}
+
+function _statValue(box, pid, statKey){
+  const line = box.lines.get(pid);
+  const d = box.derived(pid);
+  if (statKey==="PTS") return d.pts;
+  if (statKey==="3PM") return line["3PM"];
+  if (statKey==="2PM") return line["2PM"];
+  if (statKey==="REB") return line["OREB"] + line["DREB"];
+  if (statKey==="AST") return line["AST"];
+  if (statKey==="STL") return line["STL"];
+  if (statKey==="BLK") return line["BLK"];
+  return 0;
+}
+
+async function _computeElo(gamesChrono){
+  const elo = new Map();
+  const ELO_START=1000;
+  const K_BASE=20;
+  const get=(pid)=> elo.has(pid)?elo.get(pid):(elo.set(pid,ELO_START),ELO_START);
+  const set=(pid,v)=> elo.set(pid,v);
+
+  const start = new Map();
+  for (const g of gamesChrono){
+    const teamA=g.sideA_player_ids;
+    const teamB=g.sideB_player_ids;
+    for(const pid of [...teamA,...teamB]) if(!start.has(pid)) start.set(pid, get(pid));
+
+    const eloA=teamA.reduce((s,p)=>s+get(p),0)/teamA.length;
+    const eloB=teamB.reduce((s,p)=>s+get(p),0)/teamB.length;
+    const expectedA = 1/(1+Math.pow(10,(eloB-eloA)/400));
+    const actualA = (g.winner_side==="A")?1:0;
+
+    const margin=Math.abs(g.final_score_a-g.final_score_b);
+    const winnerScore=Math.max(g.final_score_a,g.final_score_b);
+    const marginMult=Math.min(2.0, 1+(margin/10));
+    const scoreMult=Math.min(1.5, 1+(winnerScore/100));
+    const K=K_BASE*marginMult*scoreMult;
+
+    const deltaA=K*(actualA-expectedA);
+    const deltaB=-deltaA;
+
+    for(const pid of teamA) set(pid, get(pid)+deltaA);
+    for(const pid of teamB) set(pid, get(pid)+deltaB);
+  }
+
+  const delta = new Map();
+  for (const [pid, rating] of elo.entries()){
+    const base = start.get(pid) ?? 1000;
+    delta.set(pid, rating - base);
+  }
+  return { elo, delta };
+}
+
+async function _buildTopPerformances(games, playersById, topN){
+  const cats=[
+    {key:"PTS", label:"Points"},
+    {key:"3PM", label:"3s Made"},
+    {key:"2PM", label:"2s Made"},
+    {key:"REB", label:"Rebounds"},
+    {key:"AST", label:"Assists"},
+    {key:"STL", label:"Steals"},
+    {key:"BLK", label:"Blocks"},
+  ];
+  const out = new Map();
+  for (const c of cats) out.set(c.key, []);
+
+  for (const g of games){
+    const evs = await DB.listEventsForGame(g.game_id);
+    const box = computeFromEvents(g, evs);
+
+    const [a1,a2]=g.sideA_player_ids;
+    const [b1,b2]=g.sideB_player_ids;
+
+    const metaFor = (pid)=>{
+      const side = g.sideA_player_ids.includes(pid) ? "A" : "B";
+      const teammate = (side==="A") ? (pid===a1?a2:a1) : (pid===b1?b2:b1);
+      const opp = (side==="A") ? [b1,b2] : [a1,a2];
+      return { teammate, opp };
+    };
+
+    for (const pid of [...g.sideA_player_ids, ...g.sideB_player_ids]){
+      const meta = metaFor(pid);
+      for (const c of cats){
+        const v = _statValue(box, pid, c.key);
+        out.get(c.key).push({
+          pid,
+          player: _pidName(pid, playersById),
+          value: v,
+          date: g.played_at.slice(0,10),
+          teammate: _formatTeammate(meta.teammate, playersById),
+          vs: _formatVs(meta.opp[0], meta.opp[1], playersById),
+        });
+      }
+    }
+  }
+
+  for (const c of cats){
+    out.set(c.key, out.get(c.key).sort((a,b)=>b.value-a.value).slice(0, topN));
+  }
+  return {cats, out};
+}
+
+async function _longestWinStreaks(gamesChrono){
+  const best = new Map();
+  const cur = new Map();
+  for (const g of gamesChrono){
+    const winner = g.winner_side;
+    for (const pid of [...g.sideA_player_ids, ...g.sideB_player_ids]){
+      const side = g.sideA_player_ids.includes(pid) ? "A" : "B";
+      const won = (side === winner);
+      const c = cur.get(pid) || 0;
+      const next = won ? (c+1) : 0;
+      cur.set(pid, next);
+      best.set(pid, Math.max(best.get(pid)||0, next));
+    }
+  }
+  return best;
+}
+
+async function showPlayerModal(player_id){
+  const playersAll=await DB.listPlayers(false);
+  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
+  const p=playersById.get(player_id);
+  if(!p) return;
+
+  const allGames=(await DB.listAllFinalizedGames()).sort((a,b)=>a.played_at.localeCompare(b.played_at));
+  const seasonGames=(await DB.listGamesForSeason(state.season.season_id, true)).sort((a,b)=>a.played_at.localeCompare(b.played_at));
+
+  const cats=[
+    {key:"PTS", label:"PTS"},
+    {key:"3PM", label:"3PM"},
+    {key:"2PM", label:"2PM"},
+    {key:"REB", label:"REB"},
+    {key:"AST", label:"AST"},
+    {key:"STL", label:"STL"},
+    {key:"BLK", label:"BLK"},
+  ];
+
+  const initHigh=()=>({value:-1,date:"—",teammate:"—",vs:"—"});
+  const highs={};
+  for (const c of cats) highs[c.key]=initHigh();
+
+  // simple W-L all-time + season
+  const wl=(games)=>{
+    let w=0,l=0;
+    for(const g of games){
+      const side = g.sideA_player_ids.includes(player_id) ? "A" : (g.sideB_player_ids.includes(player_id) ? "B" : null);
+      if(!side) continue;
+      if(side===g.winner_side) w++; else l++;
+    }
+    return {w,l};
+  };
+
+  for (const g of allGames){
+    if(!g.sideA_player_ids.includes(player_id) && !g.sideB_player_ids.includes(player_id)) continue;
+    const evs=await DB.listEventsForGame(g.game_id);
+    const box=computeFromEvents(g, evs);
+
+    const [a1,a2]=g.sideA_player_ids;
+    const [b1,b2]=g.sideB_player_ids;
+
+    const side = g.sideA_player_ids.includes(player_id) ? "A" : "B";
+    const teammate = (side==="A") ? (player_id===a1?a2:a1) : (player_id===b1?b2:b1);
+    const opp = (side==="A") ? [b1,b2] : [a1,a2];
+
+    for (const c of cats){
+      const v=_statValue(box, player_id, c.key);
+      if (v > highs[c.key].value){
+        highs[c.key] = {
+          value: v,
+          date: g.played_at.slice(0,10),
+          teammate: _formatTeammate(teammate, playersById),
+          vs: _formatVs(opp[0], opp[1], playersById)
+        };
+      }
+    }
+  }
+
+  const allWL=wl(allGames);
+  const seasonWL=wl(seasonGames);
+
+  let html = `<div class="p"><b>${p.name}</b><br/><span class="muted">All-time: ${allWL.w}-${allWL.l} • Season: ${seasonWL.w}-${seasonWL.l}</span></div>`;
+  html += `<div class="hr"></div><div class="p"><b>Career Highs</b><br/><span class="muted">Includes date, teammate, and opponents.</span></div>`;
+  html += `<table class="table" style="margin-top:10px;"><thead><tr><th>Stat</th><th>High</th><th>Date</th><th>Teammate</th><th>vs</th></tr></thead><tbody>`;
+  for (const c of cats){
+    const h=highs[c.key];
+    html += `<tr><td><b>${c.label}</b></td><td><b>${h.value>=0?h.value:"—"}</b></td><td>${h.date}</td><td>${h.teammate}</td><td>${h.vs}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+
+  showModal("Player", html, [{label:"Close", kind:"ghost"}]);
+}
+
+async function renderLeaderboard(app){
+  const playersAll=await DB.listPlayers(false);
+  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
+  const topN = state._lbN || 10;
+  const games=(await DB.listGamesForSeason(state.season.season_id, true)).sort((a,b)=>b.played_at.localeCompare(a.played_at));
+  const {cats, out} = await _buildTopPerformances(games, playersById, topN);
+
+  const c=el("div",{class:"card section"});
+  c.appendChild(el("div",{class:"h1", html:`Leaderboard • ${state.season.name}`}));
+  c.appendChild(el("div",{class:"p", html:"Top single-game performances for the current season."}));
+
+  const controls=el("div",{class:"controls", style:"margin-top:10px;"});
+  const sel=el("select",{class:"input"});
+  sel.innerHTML = `<option value="5">Top 5</option><option value="10">Top 10</option><option value="15">Top 15</option><option value="25">Top 25</option><option value="50">Top 50</option>`;
+  sel.value = String(topN);
+  sel.onchange=()=>{ state._lbN = Number(sel.value); render(); };
+  controls.appendChild(sel);
+  c.appendChild(controls);
+
+  for (const cat of cats){
+    const list = out.get(cat.key) || [];
+    c.appendChild(el("div",{class:"hr"}));
+    c.appendChild(el("div",{class:"h2", html:`Top ${topN} • ${cat.label}`}));
+    if(!list.length){ c.appendChild(el("div",{class:"p", html:"No games yet."})); continue; }
+    const t=el("table",{class:"table"});
+    t.appendChild(el("thead",{html:"<tr><th>#</th><th>Player</th><th>Value</th><th>Date</th><th>Teammate</th><th>vs</th></tr>"}));
+    const bdy=el("tbody",{});
+    list.forEach((r,i)=>{
+      const tr=el("tr",{});
+      tr.appendChild(el("td",{html:String(i+1)}));
+      tr.appendChild(el("td",{html:`<b>${r.player}</b>`}));
+      tr.appendChild(el("td",{html:`<b>${r.value}</b>`}));
+      tr.appendChild(el("td",{html:r.date}));
+      tr.appendChild(el("td",{html:r.teammate}));
+      tr.appendChild(el("td",{html:r.vs}));
+      bdy.appendChild(tr);
+    });
+    t.appendChild(bdy);
+    c.appendChild(t);
+  }
+  app.appendChild(c);
+}
+
+async function renderRecords(app){
+  const playersAll=await DB.listPlayers(false);
+  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
+  const topN = state._recN || 25;
+
+  const games=(await DB.listAllFinalizedGames()).sort((a,b)=>b.played_at.localeCompare(a.played_at));
+  const gamesChrono=[...games].sort((a,b)=>a.played_at.localeCompare(b.played_at));
+
+  const {cats, out} = await _buildTopPerformances(games, playersById, topN);
+  const streaks = await _longestWinStreaks(gamesChrono);
+
+  const c=el("div",{class:"card section"});
+  c.appendChild(el("div",{class:"h1", html:"All-Time Records"}));
+  c.appendChild(el("div",{class:"p", html:`Top ${topN} across every season. Includes date + teammate + opponents.`}));
+
+  const controls=el("div",{class:"controls", style:"margin-top:10px;"});
+  const sel=el("select",{class:"input"});
+  sel.innerHTML = `<option value="10">Top 10</option><option value="25">Top 25</option><option value="50">Top 50</option>`;
+  sel.value = String(topN);
+  sel.onchange=()=>{ state._recN = Number(sel.value); render(); };
+  controls.appendChild(sel);
+  c.appendChild(controls);
+
+  for (const cat of cats){
+    const list = out.get(cat.key) || [];
+    c.appendChild(el("div",{class:"hr"}));
+    c.appendChild(el("div",{class:"h2", html:`Top ${topN} • ${cat.label}`}));
+    if(!list.length){ c.appendChild(el("div",{class:"p", html:"No games yet."})); continue; }
+    const t=el("table",{class:"table"});
+    t.appendChild(el("thead",{html:"<tr><th>#</th><th>Player</th><th>Value</th><th>Date</th><th>Teammate</th><th>vs</th></tr>"}));
+    const bdy=el("tbody",{});
+    list.forEach((r,i)=>{
+      const tr=el("tr",{});
+      tr.appendChild(el("td",{html:String(i+1)}));
+      tr.appendChild(el("td",{html:`<b>${r.player}</b>`}));
+      tr.appendChild(el("td",{html:`<b>${r.value}</b>`}));
+      tr.appendChild(el("td",{html:r.date}));
+      tr.appendChild(el("td",{html:r.teammate}));
+      tr.appendChild(el("td",{html:r.vs}));
+      bdy.appendChild(tr);
+    });
+    t.appendChild(bdy);
+    c.appendChild(t);
+  }
+
+  c.appendChild(el("div",{class:"hr"}));
+  c.appendChild(el("div",{class:"h2", html:`Top ${topN} • Longest Win Streak`}));
+  const streakRows=[];
+  for (const [pid,n] of streaks.entries()){
+    streakRows.push({player:_pidName(pid, playersById), streak:n});
+  }
+  streakRows.sort((a,b)=>b.streak-a.streak);
+  const t=el("table",{class:"table"});
+  t.appendChild(el("thead",{html:"<tr><th>#</th><th>Player</th><th>Win Streak</th></tr>"}));
+  const bdy=el("tbody",{});
+  streakRows.slice(0,topN).forEach((r,i)=>{
+    const tr=el("tr",{});
+    tr.appendChild(el("td",{html:String(i+1)}));
+    tr.appendChild(el("td",{html:`<b>${r.player}</b>`}));
+    tr.appendChild(el("td",{html:`<b>${r.streak}</b>`}));
+    bdy.appendChild(tr);
+  });
+  t.appendChild(bdy);
+  c.appendChild(t);
+
+  app.appendChild(c);
+}
+
+async function renderAwards(app){
+  const playersAll=await DB.listPlayers(false);
+  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
+
+  const seasonGames=(await DB.listGamesForSeason(state.season.season_id, true)).sort((a,b)=>a.played_at.localeCompare(b.played_at));
+  const allGames=(await DB.listAllFinalizedGames()).sort((a,b)=>a.played_at.localeCompare(b.played_at));
+
+  const seasonElo = await _computeElo(seasonGames);
+  const allElo = await _computeElo(allGames);
+
+  async function totalsForGames(games){
+    const totals=new Map();
+    const init=()=>({GP:0,W:0,L:0, PTS:0, AST:0, STL:0, BLK:0});
+    for (const g of games){
+      const evs=await DB.listEventsForGame(g.game_id);
+      const box=computeFromEvents(g, evs);
+      for (const pid of [...g.sideA_player_ids, ...g.sideB_player_ids]){
+        if(!totals.has(pid)) totals.set(pid, init());
+        const t=totals.get(pid);
+        t.GP += 1;
+        const side = g.sideA_player_ids.includes(pid) ? "A" : "B";
+        if(side===g.winner_side) t.W += 1; else t.L += 1;
+        const line=box.lines.get(pid);
+        const d=box.derived(pid);
+        t.PTS += d.pts;
+        t.AST += line["AST"];
+        t.STL += line["STL"];
+        t.BLK += line["BLK"];
+      }
+    }
+    return totals;
+  }
+
+  const seasonTotals = await totalsForGames(seasonGames);
+  const allTotals = await totalsForGames(allGames);
+
+  const closeMargin=5;
+  const seasonClose = seasonGames.filter(g=>Math.abs(g.final_score_a-g.final_score_b)<=closeMargin);
+  const seasonCloseTotals = await totalsForGames(seasonClose);
+
+  const minGames = 5;
+
+  const root=el("div",{});
+  const head=el("div",{class:"card section"});
+  head.appendChild(el("div",{class:"h1", html:"Awards"}));
+  head.appendChild(el("div",{class:"p", html:"Season awards + all-time awards (data-driven)."}));
+  root.appendChild(head);
+
+  const mkCard=(title, subtitle, lines)=>{
+    const card=el("div",{class:"card section", style:"margin-top:12px;"});
+    card.appendChild(el("div",{class:"h2", html:title}));
+    if(subtitle) card.appendChild(el("div",{class:"p", html:subtitle}));
+    if(!lines.length) card.appendChild(el("div",{class:"p", html:"No games yet."}));
+    for(const l of lines) card.appendChild(el("div",{class:"p", html:l}));
+    return card;
+  };
+
+  // Season winners
+  const seasonLines=[];
+  let mvpPid=null, mvpElo=-1e9;
+  for (const [pid,r] of seasonElo.elo.entries()) if(r>mvpElo){mvpElo=r;mvpPid=pid;}
+  if(mvpPid) seasonLines.push(`<b>MVP (Elo)</b>: ${_pidName(mvpPid, playersById)} • ${mvpElo.toFixed(0)}`);
+
+  let scPid=null, sc=-1;
+  for (const [pid,t] of seasonTotals.entries()){
+    if(t.GP<minGames) continue;
+    const ppg=t.PTS/t.GP;
+    if(ppg>sc){sc=ppg;scPid=pid;}
+  }
+  if(scPid) seasonLines.push(`<b>Scoring Champ</b>: ${_pidName(scPid, playersById)} • ${sc.toFixed(1)} PPG (min ${minGames} GP)`);
+
+  let defPid=null, dv=-1;
+  for(const [pid,t] of seasonTotals.entries()){
+    if(t.GP<minGames) continue;
+    const v=(t.STL+t.BLK)/t.GP;
+    if(v>dv){dv=v;defPid=pid;}
+  }
+  if(defPid) seasonLines.push(`<b>Defensive Anchor</b>: ${_pidName(defPid, playersById)} • ${dv.toFixed(2)} (STL+BLK)/G`);
+
+  let clutchPid=null, cp=-1;
+  for(const [pid,t] of seasonCloseTotals.entries()){
+    if(t.GP<3) continue;
+    const wp=t.W/t.GP;
+    if(wp>cp){cp=wp;clutchPid=pid;}
+  }
+  if(clutchPid) seasonLines.push(`<b>Clutch Player</b>: ${_pidName(clutchPid, playersById)} • ${(cp*100).toFixed(0)}% win rate in ≤${closeMargin} margin games`);
+
+  let impPid=null, imp=-1e9;
+  for(const [pid,d] of seasonElo.delta.entries()){
+    if(d>imp){imp=d;impPid=pid;}
+  }
+  if(impPid) seasonLines.push(`<b>Most Improved (Elo Δ)</b>: ${_pidName(impPid, playersById)} • +${imp.toFixed(0)}`);
+
+  root.appendChild(mkCard("Season Awards", `Season: <b>${state.season.name}</b>`, seasonLines));
+
+  // All-time winners
+  const allLines=[];
+  let amvpPid=null, amvp=-1e9;
+  for (const [pid,r] of allElo.elo.entries()) if(r>amvp){amvp=r;amvpPid=pid;}
+  if(amvpPid) allLines.push(`<b>All-Time MVP (Elo)</b>: ${_pidName(amvpPid, playersById)} • ${amvp.toFixed(0)}`);
+
+  let ascPid=null, asc=-1;
+  for (const [pid,t] of allTotals.entries()){
+    if(t.GP<minGames) continue;
+    const ppg=t.PTS/t.GP;
+    if(ppg>asc){asc=ppg;ascPid=pid;}
+  }
+  if(ascPid) allLines.push(`<b>All-Time Scoring Champ</b>: ${_pidName(ascPid, playersById)} • ${asc.toFixed(1)} PPG (min ${minGames} GP)`);
+
+  let adefPid=null, adv=-1;
+  for(const [pid,t] of allTotals.entries()){
+    if(t.GP<minGames) continue;
+    const v=(t.STL+t.BLK)/t.GP;
+    if(v>adv){adv=v;adefPid=pid;}
+  }
+  if(adefPid) allLines.push(`<b>All-Time Defensive Anchor</b>: ${_pidName(adefPid, playersById)} • ${adv.toFixed(2)} (STL+BLK)/G`);
+
+  let aimpPid=null, aimp=-1e9;
+  for(const [pid,d] of allElo.delta.entries()){
+    if(d>aimp){aimp=d;aimpPid=pid;}
+  }
+  if(aimpPid) allLines.push(`<b>All-Time Most Improved (Elo Δ)</b>: ${_pidName(aimpPid, playersById)} • +${aimp.toFixed(0)}`);
+
+  root.appendChild(mkCard("All-Time Awards", "Across every season (based on full history).", allLines));
+  app.appendChild(root);
+}
+
+async function renderDraft(app){
+  const playersAll=await DB.listPlayers(false);
+  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
+  const active = playersAll.filter(p=>p.active);
+
+  const seasonGames=(await DB.listGamesForSeason(state.season.season_id, true)).sort((a,b)=>a.played_at.localeCompare(b.played_at));
+  const eloRes=await _computeElo(seasonGames);
+  const getElo=(pid)=> eloRes.elo.get(pid) ?? 1000;
+
+  const c=el("div",{class:"card section"});
+  c.appendChild(el("div",{class:"h1", html:`Draft • ${state.season.name}`}));
+  c.appendChild(el("div",{class:"p", html:"Select who’s here today. If more than 4 are selected, it randomly picks 4, then splits teams balanced by Elo."}));
+
+  const present=new Set(state._presentPlayers || []);
+
+  const controls=el("div",{class:"controls", style:"margin-top:10px;"});
+  controls.appendChild(el("button",{class:"btn", html:"Select all", onclick:()=>{ state._presentPlayers = active.map(p=>p.player_id); render(); }}));
+  controls.appendChild(el("button",{class:"btn ghost", html:"Clear", onclick:()=>{ state._presentPlayers=[]; state._draft=null; render(); }}));
+  c.appendChild(controls);
+
+  const tbl=el("table",{class:"table", style:"margin-top:10px;"});
+  tbl.appendChild(el("thead",{html:"<tr><th>Here</th><th>Player</th><th>Elo</th></tr>"}));
+  const bdy=el("tbody",{});
+  for(const p of active){
+    const tr=el("tr",{});
+    const cb=document.createElement("input");
+    cb.type="checkbox";
+    cb.checked=present.has(p.player_id);
+    cb.onchange=()=>{
+      const s=new Set(state._presentPlayers || []);
+      if(cb.checked) s.add(p.player_id); else s.delete(p.player_id);
+      state._presentPlayers=[...s];
+    };
+    const td0=el("td",{}); td0.appendChild(cb);
+    tr.appendChild(td0);
+    tr.appendChild(el("td",{html:`<b>${p.name}</b>`}));
+    tr.appendChild(el("td",{html:getElo(p.player_id).toFixed(0)}));
+    bdy.appendChild(tr);
+  }
+  tbl.appendChild(bdy);
+  c.appendChild(tbl);
+
+  const btn=el("button",{class:"btn ok", style:"margin-top:12px;", html:"Randomize Teams", onclick:()=>{
+    const selected = state._presentPlayers || [];
+    if(selected.length<4){
+      showModal("Need 4 players", "Select at least <b>4</b> players who are present.", [{label:"OK", kind:"ghost"}]);
+      return;
+    }
+    // shuffle and pick 4
+    const pool=[...selected];
+    for(let i=pool.length-1;i>0;i--){
+      const j=Math.floor(Math.random()*(i+1));
+      [pool[i],pool[j]]=[pool[j],pool[i]];
+    }
+    const pick=pool.slice(0,4);
+
+    // best balanced split
+    const combos=[
+      [[pick[0],pick[1]],[pick[2],pick[3]]],
+      [[pick[0],pick[2]],[pick[1],pick[3]]],
+      [[pick[0],pick[3]],[pick[1],pick[2]]],
+    ];
+    let best=null;
+    for(const [A,B] of combos){
+      const sumA=getElo(A[0])+getElo(A[1]);
+      const sumB=getElo(B[0])+getElo(B[1]);
+      const diff=Math.abs(sumA-sumB);
+      const score=diff + (Math.random()*0.001);
+      if(!best || score<best.score) best={A,B,sumA,sumB,diff,score};
+    }
+    state._draft=best;
+    render();
+  }});
+  c.appendChild(btn);
+
+  if(state._draft){
+    const d=state._draft;
+    const teamBox=el("div",{class:"pair-grid", style:"margin-top:12px;"});
+    const cardA=el("div",{class:"card section"});
+    cardA.appendChild(el("div",{class:"h2", html:`Team A (Elo ${d.sumA.toFixed(0)})`}));
+    cardA.appendChild(el("div",{class:"p", html:`<b>${_pidName(d.A[0], playersById)}</b> • ${getElo(d.A[0]).toFixed(0)}`}));
+    cardA.appendChild(el("div",{class:"p", html:`<b>${_pidName(d.A[1], playersById)}</b> • ${getElo(d.A[1]).toFixed(0)}`}));
+
+    const cardB=el("div",{class:"card section"});
+    cardB.appendChild(el("div",{class:"h2", html:`Team B (Elo ${d.sumB.toFixed(0)})`}));
+    cardB.appendChild(el("div",{class:"p", html:`<b>${_pidName(d.B[0], playersById)}</b> • ${getElo(d.B[0]).toFixed(0)}`}));
+    cardB.appendChild(el("div",{class:"p", html:`<b>${_pidName(d.B[1], playersById)}</b> • ${getElo(d.B[1]).toFixed(0)}`}));
+
+    teamBox.appendChild(cardA);
+    teamBox.appendChild(cardB);
+    c.appendChild(el("div",{class:"p", style:"margin-top:10px;", html:`Balance diff: <b>${d.diff.toFixed(0)}</b> Elo points`}));
+    c.appendChild(teamBox);
+  } else {
+    c.appendChild(el("div",{class:"p", style:"margin-top:10px;", html:"No draft yet."}));
+  }
+
+  app.appendChild(c);
 }

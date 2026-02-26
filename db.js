@@ -247,6 +247,22 @@ const DB = {
   },
 
   // Outbox ops
+
+  async listAllFinalizedGames(){
+    return tx(["games"], "readonly", ({games}) => new Promise(res=>{
+      const out=[];
+      const cur = games.openCursor();
+      cur.onsuccess = (e)=>{
+        const c=e.target.result;
+        if(!c) return res(out);
+        const v=c.value;
+        if(v.finalized===true) out.push(v);
+        c.continue();
+      };
+      cur.onerror = ()=>res(out);
+    }));
+  },
+
   async enqueueOp(kind, payload) {
     const op = { op_id: uuidv4(), kind, payload, created_at: new Date().toISOString() };
     await tx(["outbox"], "readwrite", ({outbox}) => outbox.put(op));
