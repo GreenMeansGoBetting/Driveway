@@ -1,4 +1,4 @@
-// UI + routing + live stat tracking
+// UI + routing + live stat tracking (with Supabase cloud backup)
 let state = { route:"home", season:null, players:[], currentGame:null };
 
 function $(sel){ return document.querySelector(sel); }
@@ -61,14 +61,63 @@ function computeFromEvents(game, events){
   return {lines, derived, scoreA, scoreB, lead, canFinalize, winner_side};
 }
 
+async function refreshPlayers(){ state.players=await DB.listPlayers(true); }
+
+async function ensureSeason(){
+  // prefer stored season id
+  const sid = await DB.getSetting("current_season_id", null);
+  if (sid) {
+    const seasons = await DB.listSeasons(true);
+    const found = seasons.find(s => s.season_id === sid);
+    if (found) return found;
+  }
+  const s = await DB.ensureDefaultSeason();
+  await DB.setSetting("current_season_id", s.season_id);
+  return s;
+}
+
+async function updateHeaderSeason(){
+  state.season = await ensureSeason();
+  $("#seasonSub").textContent = `Season: ${state.season.name}`;
+}
+
 async function init(){
   document.querySelectorAll(".nav-btn").forEach(b=>b.addEventListener("click", ()=>setRoute(b.dataset.route)));
+
   $("#btnExportQuick").addEventListener("click", async()=>{ if(state.season) await exportSeason(state.season); });
+
+  $("#btnSync").addEventListener("click", async()=>{
+    try{
+      const health = await sbHealth();
+      if (!health.configured) {
+        showModal("Cloud not configured",
+          "Paste your Supabase URL + anon key into <b>config.js</b> (see README).",
+          [{label:"OK", kind:"ghost"}]
+        );
+        return;
+      }
+      if (!health.signed_in) {
+        setRoute("login");
+        return;
+      }
+      showModal("Syncing…", "Pushing pending changes to cloud, then refreshing from cloud.", []);
+      const up = await sbSyncUp();
+      const down = await sbSyncDown();
+      hideModal();
+      await updateHeaderSeason();
+      render();
+      showModal("Sync complete", `Pushed: <b>${up.pushed}</b><br/>Cloud rows pulled: players ${down.players}, seasons ${down.seasons}, games ${down.games}, events ${down.events}`, [{label:"OK", kind:"ghost"}]);
+    } catch(e){
+      hideModal();
+      showModal("Sync error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+    }
+  });
+
   $("#btnSettings").addEventListener("click", async()=>{
-    const auto=await DB.getSetting("auto_export_finalize", true);
+    const auto=await DB.getSetting("auto_export_finalize", false); // default OFF now
     showModal("Settings",
       `<div class="row" style="justify-content:space-between;">
-        <div><b>Auto-export after Finalize</b><div class="kbd">Downloads game + season exports after each finalize</div></div>
+        <div><b>Auto-export after Finalize</b><div class="kbd">If ON, downloads exports after each finalized game</div></div>
         <button class="btn ${auto?"ok":"ghost"}" id="toggleAuto">${auto?"ON":"OFF"}</button>
       </div>`,
       [{label:"Close", kind:"ghost"}]
@@ -77,23 +126,58 @@ async function init(){
       const t=document.getElementById("toggleAuto");
       if(!t) return;
       t.onclick=async()=>{
-        const cur=await DB.getSetting("auto_export_finalize", true);
+        const cur=await DB.getSetting("auto_export_finalize", false);
         await DB.setSetting("auto_export_finalize", !cur);
         hideModal();
       };
     },0);
   });
 
-  state.season=await DB.ensureDefaultSeason();
-  $("#seasonSub").textContent=`Season: ${state.season.name}`;
+  await updateHeaderSeason();
+
+  // If Supabase configured + logged in, sync down once on startup (so laptop/iPad match)
+  try{
+    const health = await sbHealth();
+    if (health.configured && health.signed_in) {
+      await sbSyncUp();
+      await sbSyncDown();
+      await updateHeaderSeason();
+    }
+  } catch {}
+
   setRoute("home");
 }
 init();
 
-async function refreshPlayers(){ state.players=await DB.listPlayers(true); }
+async function cloudBar(){
+  const h = await sbHealth();
+  let dotClass = "dot";
+  let text = "Local only";
+  if (h.configured && h.signed_in) {
+    dotClass = (h.pending_ops===0) ? "dot ok" : "dot warn";
+    text = (h.pending_ops===0) ? `Cloud ✓ (${h.email})` : `Cloud pending (${h.pending_ops})`;
+  } else if (h.configured && !h.signed_in) {
+    dotClass = "dot warn";
+    text = "Cloud (not signed in)";
+  } else {
+    dotClass = "dot";
+    text = "Cloud not set";
+  }
+  const bar = el("div",{class:"cloudbar"});
+  bar.appendChild(el("div",{class:"cloud-pill", html:`<span class="${dotClass}"></span>${text}`}));
+  if (h.configured && !h.signed_in) {
+    bar.appendChild(el("button",{class:"btn ghost", html:"Sign in", onclick:()=>setRoute("login")}));
+  }
+  return bar;
+}
 
 async function render(){
   const app=$("#app"); app.innerHTML="";
+
+  if (state.route === "login") return renderLogin(app);
+
+  app.appendChild(await cloudBar());
+
   if(state.route==="home") return renderHome(app);
   if(state.route==="players") return renderPlayers(app);
   if(state.route==="start") return renderStart(app);
@@ -105,7 +189,7 @@ async function render(){
 function renderHome(app){
   const c=el("div",{class:"card section"});
   c.appendChild(el("div",{class:"h1", html:"Home"}));
-  c.appendChild(el("div",{class:"p", html:"2v2 driveway stat tracker. Data stays on this iPad."}));
+  c.appendChild(el("div",{class:"p", html:"2v2 driveway stat tracker. Saves locally and (optionally) backs up to Supabase cloud."}));
   const row=el("div",{class:"row"});
   row.appendChild(el("button",{class:"btn ok", html:"Start Game", onclick:()=>setRoute("start")}));
   row.appendChild(el("button",{class:"btn ghost", html:"Players", onclick:()=>setRoute("players")}));
@@ -117,23 +201,78 @@ function renderHome(app){
   app.appendChild(c);
 
   const tips=el("div",{class:"card section", style:"margin-top:12px;"});
-  tips.appendChild(el("div",{class:"h2", html:"Tips"}));
+  tips.appendChild(el("div",{class:"h2", html:"Backups"}));
+  tips.appendChild(el("div",{class:"p", html:"Cloud: tap <b>Sync</b> anytime (top right). For safety, export occasionally too."}));
   tips.appendChild(el("div",{class:"p", html:"On iPad Safari: Share → Add to Home Screen."}));
-  tips.appendChild(el("div",{class:"p", html:"Export regularly for backups (downloads CSV + JSON)."}));
   app.appendChild(tips);
+}
+
+async function renderLogin(app){
+  const c=el("div",{class:"card section"});
+  c.appendChild(el("div",{class:"h1", html:"Cloud Sign In"}));
+
+  const ready = supabaseReady();
+  if (!ready) {
+    c.appendChild(el("div",{class:"p", html:"Cloud not configured yet. Open <b>config.js</b> and paste your Supabase URL + anon key."}));
+    c.appendChild(el("button",{class:"btn ghost", html:"Back", onclick:()=>setRoute("home")}));
+    app.appendChild(c);
+    return;
+  }
+
+  const email = el("input",{class:"input", placeholder:"Email", type:"email"});
+  const pass = el("input",{class:"input", placeholder:"Password", type:"password", style:"margin-top:10px;"});
+
+  const btnRow = el("div",{class:"row", style:"margin-top:12px;"});
+  btnRow.appendChild(el("button",{class:"btn ok", html:"Sign In", onclick:async()=>{
+    try{
+      await sbSignIn(email.value.trim(), pass.value);
+      showModal("Signed in", "Now syncing down your cloud data…", []);
+      await sbSyncUp();
+      await sbSyncDown();
+      hideModal();
+      await updateHeaderSeason();
+      setRoute("home");
+    } catch(e){
+      hideModal();
+      showModal("Sign in error", (e&&e.message)?e.message:String(e), [{label:"OK", kind:"ghost"}]);
+    }
+  }}));
+  btnRow.appendChild(el("button",{class:"btn ghost", html:"Create Account", onclick:async()=>{
+    try{
+      await sbSignUp(email.value.trim(), pass.value);
+      showModal("Account created", "If Supabase requires email confirmation, confirm then sign in. Otherwise syncing now…", []);
+      await sbSyncUp();
+      await sbSyncDown();
+      hideModal();
+      await updateHeaderSeason();
+      setRoute("home");
+    } catch(e){
+      hideModal();
+      showModal("Sign up error", (e&&e.message)?e.message:String(e), [{label:"OK", kind:"ghost"}]);
+    }
+  }}));
+  btnRow.appendChild(el("button",{class:"btn ghost", html:"Back", onclick:()=>setRoute("home")}));
+
+  c.appendChild(email);
+  c.appendChild(pass);
+  c.appendChild(btnRow);
+
+  app.appendChild(c);
 }
 
 async function renderPlayers(app){
   await refreshPlayers();
   const c=el("div",{class:"card section"});
   c.appendChild(el("div",{class:"h1", html:"Players"}));
-  c.appendChild(el("div",{class:"p", html:"Add players once. Archive later if needed."}));
+  c.appendChild(el("div",{class:"p", html:"Add players once. If cloud is enabled, they sync across devices."}));
 
   const input=el("input",{class:"input", placeholder:"Add player name…"});
   const add=el("button",{class:"btn ok", html:"Add", onclick:async()=>{
     const name=input.value.trim();
     if(!name) return;
-    await DB.addPlayer(name);
+    const p = await DB.addPlayer(name);
+    // queue cloud upsert
+    await DB.enqueueOp("upsert_player", p);
     input.value="";
     render();
   }});
@@ -147,10 +286,10 @@ async function renderPlayers(app){
     tr.appendChild(el("td",{html:`<b>${p.name}</b><div class="kbd">${p.player_id.slice(0,8)}</div>`}));
     const td=el("td",{});
     td.appendChild(el("button",{class:"btn small ghost", html:"Archive", onclick:async()=>{
-      showModal("Archive player?",
-        `Hide <b>${p.name}</b> from selection but keep all historical stats.`,
-        [{label:"Cancel", kind:"ghost"},{label:"Archive", kind:"danger", onClick:async()=>{ p.active=false; await DB.updatePlayer(p); render(); }}]
-      );
+      p.active=false;
+      await DB.updatePlayer(p);
+      await DB.enqueueOp("upsert_player", p);
+      render();
     }}));
     tr.appendChild(td);
     tb.appendChild(tr);
@@ -244,6 +383,7 @@ async function renderStart(app){
   c.appendChild(el("button",{class:`btn ${ready?"ok":"ghost"}`, html:"Start", onclick:async()=>{
     if(!ready) return;
     const game=await DB.addGame(state.season.season_id, s.A, s.B);
+    await DB.enqueueOp("upsert_game", game);
     state.currentGame=game;
     state._start=null;
     setRoute("live");
@@ -293,7 +433,11 @@ async function renderLive(app){
   for(const pid of game.sideA_player_ids) sideMap.set(pid,"A");
   for(const pid of game.sideB_player_ids) sideMap.set(pid,"B");
 
-  const addEvent=async(pid, stat)=>{ await DB.addEvent(game.game_id, pid, stat); render(); };
+  const addEvent=async(pid, stat)=>{
+    const ev = await DB.addEvent(game.game_id, pid, stat);
+    await DB.enqueueOp("upsert_event", ev);
+    render();
+  };
 
   const cardFor=(pid)=>{
     const line=box.lines.get(pid);
@@ -337,6 +481,7 @@ async function renderLive(app){
     if(!evs.length) return;
     const last=evs[evs.length-1];
     await DB.deleteEvent(last.event_id);
+    await DB.enqueueOp("delete_event", { event_id: last.event_id });
     render();
   }}));
   act.appendChild(el("button",{class:"btn ok", html:"End Game", onclick:async()=>{
@@ -400,9 +545,12 @@ async function renderRecap(app){
     game.final_score_a=box.scoreA;
     game.final_score_b=box.scoreB;
     game.winner_side=box.winner_side;
-    await DB.updateGame(game);
+    await DB.putGame(game);
 
-    const auto=await DB.getSetting("auto_export_finalize", true);
+    // queue a bulk finalize upsert (game + its events) for reliability
+    await DB.enqueueOp("upsert_bulk_finalize", { game, events: evs });
+
+    const auto=await DB.getSetting("auto_export_finalize", false);
     if(auto){
       await exportGame(game, state.season, playersById);
       await exportSeason(state.season);
@@ -413,7 +561,12 @@ async function renderRecap(app){
   row.appendChild(el("button",{class:"btn ghost", html:"Export Game", onclick:async()=>{ await exportGame(game, state.season, playersById); }}));
   row.appendChild(el("button",{class:"btn danger", html:"Discard Game", onclick:async()=>{
     showModal("Discard this game?", "This deletes the game and all its events.",
-      [{label:"Cancel", kind:"ghost"},{label:"Discard", kind:"danger", onClick:async()=>{ await DB.deleteGame(game.game_id); state.currentGame=null; setRoute("home"); }}]
+      [{label:"Cancel", kind:"ghost"},{label:"Discard", kind:"danger", onClick:async()=>{
+        await DB.deleteGame(game.game_id);
+        await DB.enqueueOp("delete_game", { game_id: game.game_id });
+        state.currentGame=null;
+        setRoute("home");
+      }}]
     );
   }}));
   c.appendChild(row);
@@ -465,10 +618,10 @@ async function renderDashboard(app){
 
   const c=el("div",{class:"card section"});
   c.appendChild(el("div",{class:"h1", html:`Dashboard • ${state.season.name}`}));  
-  c.appendChild(el("div",{class:"p", html:`Games: <b>${games.length}</b> • Tap Export for full CSVs + teammate/opponent summaries.`}));
+  c.appendChild(el("div",{class:"p", html:`Games: <b>${games.length}</b> • Cloud: tap <b>Sync</b> to back up / restore across devices.`}));
 
   const tbl=el("table",{class:"table", style:"margin-top:12px;"});
-  tbl.appendChild(el("thead",{html:"<tr><th>Player</th><th>GP</th><th>W-L</th><th>PTS/G</th><th>REB/G</th><th>AST/G</th><th>STL/G</th><th>BLK/G</th><th>2P%</th><th>3P%</th></tr>"}));
+  tbl.appendChild(el("thead",{html:"<tr><th>Player</th><th>GP</th><th>W-L</th><th>PTS/G</th><th>REB/G</th><th>AST/G</th><th>STL/G</th><th>BLK</th><th>2P%</th><th>3P%</th></tr>"}));
   const tb=el("tbody",{});
   const pct=(x)=> x===null? "—" : (x*100).toFixed(0)+"%";
   for(const r of rows){

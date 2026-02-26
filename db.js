@@ -1,6 +1,6 @@
 // IndexedDB wrapper (no external deps)
 const DB_NAME = "driveway_stats_db";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function uuidv4() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
@@ -44,6 +44,12 @@ function openDB() {
 
       if (!db.objectStoreNames.contains("settings")) {
         db.createObjectStore("settings", { keyPath: "key" });
+      }
+
+      // NEW: outbox queue for cloud sync
+      if (!db.objectStoreNames.contains("outbox")) {
+        const s = db.createObjectStore("outbox", { keyPath: "op_id" });
+        s.createIndex("created_at", "created_at", { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -97,22 +103,22 @@ const DB = {
     }));
   },
 
+  async putPlayer(player) {
+    return tx(["players"], "readwrite", ({players}) => players.put(player));
+  },
+
+  async clearPlayers() {
+    return tx(["players"], "readwrite", ({players}) => players.clear());
+  },
+
   async addPlayer(name) {
     const player = { player_id: uuidv4(), name: name.trim(), created_at: new Date().toISOString(), active: true };
-    await tx(["players"], "readwrite", ({players}) => players.put(player));
+    await DB.putPlayer(player);
     return player;
   },
 
   async updatePlayer(player) {
-    return tx(["players"], "readwrite", ({players}) => players.put(player));
-  },
-
-  async getPlayer(id) {
-    return tx(["players"], "readonly", ({players}) => new Promise(res => {
-      const r = players.get(id);
-      r.onsuccess = () => res(r.result || null);
-      r.onerror = () => res(null);
-    }));
+    return DB.putPlayer(player);
   },
 
   async listSeasons(includeArchived=false) {
@@ -130,14 +136,30 @@ const DB = {
     }));
   },
 
+  async putSeason(season) {
+    return tx(["seasons"], "readwrite", ({seasons}) => seasons.put(season));
+  },
+
+  async clearSeasons() {
+    return tx(["seasons"], "readwrite", ({seasons}) => seasons.clear());
+  },
+
   async ensureDefaultSeason() {
     const seasonName = "Driveway 2026";
     const seasons = await DB.listSeasons(true);
     const found = seasons.find(s => s.name === seasonName && !s.archived);
     if (found) return found;
     const season = { season_id: uuidv4(), name: seasonName, start_date: new Date().toISOString().slice(0,10), archived: false };
-    await tx(["seasons"], "readwrite", ({seasons}) => seasons.put(season));
+    await DB.putSeason(season);
     return season;
+  },
+
+  async putGame(game) {
+    return tx(["games"], "readwrite", ({games}) => games.put(game));
+  },
+
+  async clearGames() {
+    return tx(["games"], "readwrite", ({games}) => games.clear());
   },
 
   async addGame(season_id, sideA_ids, sideB_ids) {
@@ -153,20 +175,8 @@ const DB = {
       finalized: false,
       notes: ""
     };
-    await tx(["games"], "readwrite", ({games}) => games.put(game));
+    await DB.putGame(game);
     return game;
-  },
-
-  async getGame(game_id) {
-    return tx(["games"], "readonly", ({games}) => new Promise(res => {
-      const r = games.get(game_id);
-      r.onsuccess = () => res(r.result || null);
-      r.onerror = () => res(null);
-    }));
-  },
-
-  async updateGame(game) {
-    return tx(["games"], "readwrite", ({games}) => games.put(game));
   },
 
   async deleteGame(game_id) {
@@ -186,9 +196,17 @@ const DB = {
     });
   },
 
+  async putEvent(ev) {
+    return tx(["events"], "readwrite", ({events}) => events.put(ev));
+  },
+
+  async clearEvents() {
+    return tx(["events"], "readwrite", ({events}) => events.clear());
+  },
+
   async addEvent(game_id, player_id, stat_type) {
     const ev = { event_id: uuidv4(), game_id, timestamp: new Date().toISOString(), player_id, stat_type, delta: 1 };
-    await tx(["events"], "readwrite", ({events}) => events.put(ev));
+    await DB.putEvent(ev);
     return ev;
   },
 
@@ -226,5 +244,30 @@ const DB = {
       };
       req.onerror = () => resolve(out);
     }));
+  },
+
+  // Outbox ops
+  async enqueueOp(kind, payload) {
+    const op = { op_id: uuidv4(), kind, payload, created_at: new Date().toISOString() };
+    await tx(["outbox"], "readwrite", ({outbox}) => outbox.put(op));
+    return op;
+  },
+
+  async listOps() {
+    return tx(["outbox"], "readonly", ({outbox}) => new Promise(resolve => {
+      const out = [];
+      const req = outbox.openCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return resolve(out.sort((a,b)=>a.created_at.localeCompare(b.created_at)));
+        out.push(c.value);
+        c.continue();
+      };
+      req.onerror = () => resolve(out);
+    }));
+  },
+
+  async deleteOp(op_id) {
+    return tx(["outbox"], "readwrite", ({outbox}) => outbox.delete(op_id));
   }
 };

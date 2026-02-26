@@ -196,3 +196,16 @@ body{
   box-shadow: var(--shadow);
   padding:14px;
 }
+
+.cloudbar{display:flex; gap:10px; align-items:center; justify-content:space-between; margin: 10px 0;}
+.cloud-pill{
+  display:inline-flex; gap:8px; align-items:center;
+  padding:6px 10px; border-radius:999px;
+  border:1px solid var(--border);
+  background: rgba(255,255,255,.04);
+  color: var(--muted);
+  font-size:12px; font-weight:900;
+}
+.dot{width:8px;height:8px;border-radius:50%; background: rgba(239,68,68,.8);}
+.dot.ok{background: rgba(34,197,94,.85);}
+.dot.warn{background: rgba(245,158,11,.85);}

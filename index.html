@@ -18,6 +18,7 @@
       </div>
     </div>
     <div class="header-actions">
+      <button class="btn ghost" id="btnSync" title="Sync to cloud">Sync</button>
       <button class="btn ghost" id="btnExportQuick" title="Export season CSV/JSON">Export</button>
       <button class="btn ghost" id="btnSettings" title="Settings">⚙︎</button>
     </div>
@@ -35,9 +36,18 @@
   <div class="modal-backdrop" id="modalBackdrop" hidden></div>
   <div class="modal" id="modal" hidden></div>
 
+  <!-- 1) Put your Supabase URL + anon key in config.js -->
+  <script src="config.js"></script>
+
+  <!-- 2) Supabase JS SDK (loaded from CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- App scripts -->
   <script src="db.js"></script>
+  <script src="supabase_client.js"></script>
   <script src="export.js"></script>
   <script src="app.js"></script>
+
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('service-worker.js').catch(()=>{}));
