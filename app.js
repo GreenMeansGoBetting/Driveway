@@ -1204,15 +1204,16 @@ async function _longestWinStreaks(gamesChrono){
   return best;
 }
 
-async function showPlayerModal(player_id){
+async async function showPlayerModal(player_id){
   const playersAll=await DB.listPlayers(false);
   const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
   const p=playersById.get(player_id);
   if(!p) return;
 
   const allGames=(await DB.listAllFinalizedGames()).sort((a,b)=>a.played_at.localeCompare(b.played_at));
-  const seasonGames=(await DB.listGamesForSeason(state.season.season_id, true)).sort((a,b)=>a.played_at.localeCompare(b.played_at));
+  const seasonGames=(state.season ? (await DB.listGamesForSeason(state.season.season_id, true)).sort((a,b)=>a.played_at.localeCompare(b.played_at)) : []);
 
+  // Categories for highs table
   const cats=[
     {key:"PTS", label:"PTS"},
     {key:"3PM", label:"3PM"},
@@ -1223,23 +1224,31 @@ async function showPlayerModal(player_id){
     {key:"BLK", label:"BLK"},
   ];
 
-  const initHigh=()=>({value:-1,date:"—",teammate:"—",vs:"—"});
+  const initHigh=()=>({value:-1,date:"—",teammate:"—",vs:"—", extra:""});
   const highs={};
   for (const c of cats) highs[c.key]=initHigh();
 
-  // simple W-L all-time + season
-  const wl=(games)=>{
-    let w=0,l=0;
-    for(const g of games){
-      const side = g.sideA_player_ids.includes(player_id) ? "A" : (g.sideB_player_ids.includes(player_id) ? "B" : null);
-      if(!side) continue;
-      if(side===g.winner_side) w++; else l++;
-    }
-    return {w,l};
+  // Career totals (all-time)
+  const totals={ GP:0, W:0, L:0, PTS:0,
+    twoM:0,twoA:0, threeM:0,threeA:0,
+    REB:0, AST:0, STL:0, BLK:0
+  };
+
+  // simple W-L helper
+  const wl=(g)=>{
+    const side = g.sideA_player_ids.includes(player_id) ? "A" : (g.sideB_player_ids.includes(player_id) ? "B" : null);
+    if(!side) return null;
+    return (side===g.winner_side) ? "W" : "L";
   };
 
   for (const g of allGames){
     if(!g.sideA_player_ids.includes(player_id) && !g.sideB_player_ids.includes(player_id)) continue;
+
+    totals.GP += 1;
+    const res = wl(g);
+    if(res==="W") totals.W += 1;
+    else if(res==="L") totals.L += 1;
+
     const evs=await DB.listEventsForGame(g.game_id);
     const box=computeFromEvents(g, evs);
 
@@ -1250,28 +1259,75 @@ async function showPlayerModal(player_id){
     const teammate = (side==="A") ? (player_id===a1?a2:a1) : (player_id===b1?b2:b1);
     const opp = (side==="A") ? [b1,b2] : [a1,a2];
 
+    const line = box.lines.get(player_id);
+    const d = box.derived(player_id);
+
+    const pts = d.pts;
+    const twoM = line["2PM"], twoA = d.twoA;
+    const threeM = line["3PM"], threeA = d.threeA;
+    const reb = line["OREB"] + line["DREB"];
+
+    totals.PTS += pts;
+    totals.twoM += twoM; totals.twoA += twoA;
+    totals.threeM += threeM; totals.threeA += threeA;
+    totals.REB += reb;
+    totals.AST += line["AST"];
+    totals.STL += line["STL"];
+    totals.BLK += line["BLK"];
+
+    // highs
     for (const c of cats){
       const v=_statValue(box, player_id, c.key);
       if (v > highs[c.key].value){
+        let extra="";
+        if (c.key==="3PM") extra = ` (${threeM}/${threeA})`;
+        if (c.key==="2PM") extra = ` (${twoM}/${twoA})`;
         highs[c.key] = {
           value: v,
           date: g.played_at.slice(0,10),
           teammate: _formatTeammate(teammate, playersById),
-          vs: _formatVs(opp[0], opp[1], playersById)
+          vs: _formatVs(opp[0], opp[1], playersById),
+          extra
         };
       }
     }
   }
 
-  const allWL=wl(allGames);
-  const seasonWL=wl(seasonGames);
+  // Season W-L (display only)
+  let seasonWL = {w:0,l:0};
+  if(state.season){
+    for(const g of seasonGames){
+      const res=wl(g);
+      if(res==="W") seasonWL.w++;
+      else if(res==="L") seasonWL.l++;
+    }
+  }
 
-  let html = `<div class="p"><b>${p.name}</b><br/><span class="muted">All-time: ${allWL.w}-${allWL.l} • Season: ${seasonWL.w}-${seasonWL.l}</span></div>`;
-  html += `<div class="hr"></div><div class="p"><b>Career Highs</b><br/><span class="muted">Includes date, teammate, and opponents.</span></div>`;
+  const pct = (m,a)=> a? ((m/a)*100).toFixed(0)+"%":"—";
+  const perG = (x)=> totals.GP? (x/totals.GP).toFixed(1):"0.0";
+
+  let html = `<div class="p"><b>${p.name}</b><br/><span class="muted">All-time: ${totals.W}-${totals.L} • Season: ${seasonWL.w}-${seasonWL.l}</span></div>`;
+
+  html += `<div class="hr"></div><div class="p"><b>Career Totals (All-Time)</b></div>`;
+  html += `<table class="table" style="margin-top:10px;"><thead><tr>
+    <th>PTS</th><th>2PM/2PA</th><th>3PM/3PA</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th><th>GP</th>
+  </tr></thead><tbody><tr>
+    <td><b>${totals.PTS}</b><div class="muted">${perG(totals.PTS)} /g</div></td>
+    <td><b>${totals.twoM}/${totals.twoA}</b><div class="muted">${pct(totals.twoM, totals.twoA)}</div></td>
+    <td><b>${totals.threeM}/${totals.threeA}</b><div class="muted">${pct(totals.threeM, totals.threeA)}</div></td>
+    <td><b>${totals.REB}</b><div class="muted">${perG(totals.REB)} /g</div></td>
+    <td><b>${totals.AST}</b><div class="muted">${perG(totals.AST)} /g</div></td>
+    <td><b>${totals.STL}</b><div class="muted">${perG(totals.STL)} /g</div></td>
+    <td><b>${totals.BLK}</b><div class="muted">${perG(totals.BLK)} /g</div></td>
+    <td><b>${totals.GP}</b></td>
+  </tr></tbody></table>`;
+
+  html += `<div class="hr"></div><div class="p"><b>Career Highs (Single Game)</b><br/><span class="muted">Includes date, teammate, and opponents.</span></div>`;
   html += `<table class="table" style="margin-top:10px;"><thead><tr><th>Stat</th><th>High</th><th>Date</th><th>Teammate</th><th>vs</th></tr></thead><tbody>`;
   for (const c of cats){
     const h=highs[c.key];
-    html += `<tr><td><b>${c.label}</b></td><td><b>${h.value>=0?h.value:"—"}</b></td><td>${h.date}</td><td>${h.teammate}</td><td>${h.vs}</td></tr>`;
+    const hv = (h.value>=0) ? (String(h.value) + (h.extra||"")) : "—";
+    html += `<tr><td><b>${c.label}</b></td><td><b>${hv}</b></td><td>${h.date}</td><td>${h.teammate}</td><td>${h.vs}</td></tr>`;
   }
   html += `</tbody></table>`;
 
