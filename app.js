@@ -4,6 +4,25 @@
 // - When a game finalizes: it clears stream_state so overlay blanks until next game starts
 
 let state = { route:"home", season:null, players:[], currentGame:null };
+// ===== AUTO CLOUD PUSH (SIMPLE + ALWAYS ON) =====
+window.AUTO_SYNC_ENABLED = true;
+
+const _origEnqueueOp = DB.enqueueOp;
+DB.enqueueOp = async function(kind, payload){
+  const res = await _origEnqueueOp.call(DB, kind, payload);
+
+  // Immediately push to Supabase (no manual Sync needed)
+  try {
+    if (typeof scheduleAutoSync === "function") {
+      scheduleAutoSync(50); // tiny debounce
+    }
+  } catch (e) {
+    console.warn("Auto sync failed:", e);
+  }
+
+  return res;
+};
+// ================================================
 
 function $(sel){ return document.querySelector(sel); }
 function el(tag, attrs={}, children=[]){
