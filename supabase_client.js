@@ -146,6 +146,13 @@ async function sbSyncUp() {
         if (payload.events && payload.events.length) {
           const rows = payload.events.map(e => ({ ...e, owner_id }));
           await sb().from("events").upsert(rows);
+          } else if (kind === "set_active_game") {
+  // Stream overlay looks here to know which game to display
+  await sb().from("stream_state").upsert({
+    id: "main",
+    active_game_id: payload.game_id,
+    owner_id
+  });
         }
       }
 
