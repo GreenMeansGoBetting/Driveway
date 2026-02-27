@@ -178,6 +178,8 @@ async function init(){
   });
 
   
+  $("#btnResume").addEventListener("click", ()=>setRoute("live"));
+
   $("#btnSignOut").addEventListener("click", async()=>{
     try{
       await sbSignOut();
@@ -317,20 +319,31 @@ init();
 async function cloudBar(){
   const h = await sbHealth();
   const last = await DB.getSetting("last_sync_at", null);
-  const lastTxt = last ? new Date(last).toLocaleString() : "—";
 
   const so = document.getElementById("btnSignOut");
   if (so) so.style.display = (h.configured && h.signed_in) ? "" : "none";
 
   // restore in-progress game (if any)
   const open = await hydrateOpenGame();
+  const br = document.getElementById("btnResume");
+  if (br) br.style.display = (open && open.finalized===false) ? "" : "none";
+
+  // mini status near Sync
+  const mini = document.getElementById("cloudMini");
+  if (mini){
+    if (h.configured && h.signed_in){
+      const pending = h.pending_ops || 0;
+      mini.textContent = pending ? `pending ${pending}` : "";
+    } else {
+      mini.textContent = "";
+    }
+  }
 
   let dotClass = "dot";
   let text = "Local only";
   if (h.configured && h.signed_in) {
     dotClass = (h.pending_ops===0) ? "dot ok" : "dot warn";
-    text = (h.pending_ops===0) ? `Cloud ✓ (${h.email})` : `Cloud pending (${h.pending_ops})`;
-    text += ` • Last sync: ${lastTxt}`;
+    text = `Cloud ✓ (${h.email})`;
   } else if (h.configured && !h.signed_in) {
     dotClass = "dot warn";
     text = "Cloud (not signed in)";
@@ -340,9 +353,11 @@ async function cloudBar(){
   bar.appendChild(el("div",{class:dotClass}));
   bar.appendChild(el("div",{class:"p", html:text}));
 
-  if(open && open.finalized===false){
-    const btn = el("button",{class:"btn ghost", style:"margin-left:auto; padding:8px 10px;", html:"Resume game", onclick:()=>setRoute("live")});
-    bar.appendChild(btn);
+  // optional tiny last-sync text (kept minimal)
+  if (h.configured && h.signed_in && last){
+    bar.appendChild(el("div",{class:"mini muted", style:"margin-left:auto;", html:`Last sync: ${new Date(last).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}`}));
+  } else {
+    bar.appendChild(el("div",{style:"margin-left:auto;"})); // keep layout stable
   }
 
   return bar;
@@ -628,14 +643,16 @@ async function renderLive(app){
   const recent = evs.slice(-3).reverse();
   const recentWrap = el("div",{style:"margin-top:10px;"});
   recentWrap.appendChild(el("div",{class:"small-note", html:"Last actions"}));
+  const row = el("div",{class:"recent-actions", style:"margin-top:6px;"});
   if(!recent.length){
-    recentWrap.appendChild(el("div",{class:"mini", style:"opacity:.75", html:"—"}));
+    row.appendChild(el("div",{class:"recent-chip", html:"—"}));
   } else {
     for(const e of recent){
       const when = (e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "");
-      recentWrap.appendChild(el("div",{class:"mini", style:"padding:0; margin-top:4px;", html:`${when ? "<span style=\"opacity:.6\">"+when+"</span> " : ""}<b>${name(e.player_id)}</b> • ${statLabel(e.stat_type)}`}));
+      row.appendChild(el("div",{class:"recent-chip", html:`${when ? "<span style=\"opacity:.6\">"+when+"</span> " : ""}<b>${name(e.player_id)}</b> • ${statLabel(e.stat_type)}`}));
     }
   }
+  recentWrap.appendChild(row);
   scoreCard.appendChild(recentWrap);
 
   app.appendChild(scoreCard);

@@ -158,6 +158,10 @@ const DB = {
     return tx(["games"], "readwrite", ({games}) => games.put(game));
   },
 
+  async getGame(game_id) {
+    return tx(["games"], "readonly", ({games}) => games.get(game_id));
+  },
+
   async clearGames() {
     return tx(["games"], "readwrite", ({games}) => games.clear());
   },
@@ -263,16 +267,11 @@ const DB = {
     }));
   },
 
-async enqueueOp(kind, payload) {
-  const op = { op_id: uuidv4(), kind, payload, created_at: new Date().toISOString() };
-  await tx(["outbox"], "readwrite", ({outbox}) => outbox.put(op));
-
-  // NEW: auto-sync to Supabase after any queued op (debounced)
-  // Safe if supabase_client.js isn't loaded: it won't throw.
-  if (typeof scheduleAutoSync === "function") scheduleAutoSync();
-
-  return op;
-},
+  async enqueueOp(kind, payload) {
+    const op = { op_id: uuidv4(), kind, payload, created_at: new Date().toISOString() };
+    await tx(["outbox"], "readwrite", ({outbox}) => outbox.put(op));
+    return op;
+  },
 
   async listOps() {
     return tx(["outbox"], "readonly", ({outbox}) => new Promise(resolve => {

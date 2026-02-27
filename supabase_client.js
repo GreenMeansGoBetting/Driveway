@@ -20,9 +20,7 @@ async function sbGetSession() {
   try {
     const { data } = await sb().auth.getSession();
     return data.session || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function sbSignIn(email, password) {
@@ -39,27 +37,6 @@ async function sbSignUp(email, password) {
 
 async function sbSignOut() {
   try { await sb().auth.signOut(); } catch {}
-}
-
-/* =========================================================
-   AUTO-SYNC (debounced)
-========================================================= */
-let AUTO_SYNC_TIMER = null;
-
-function autoSyncEnabled() {
-  return window.AUTO_SYNC_ENABLED !== false;
-}
-
-function scheduleAutoSync(delay = 400) {
-  if (!autoSyncEnabled()) return;
-  clearTimeout(AUTO_SYNC_TIMER);
-  AUTO_SYNC_TIMER = setTimeout(async () => {
-    try {
-      await sbSyncUp();
-    } catch (e) {
-      console.warn("Auto-sync failed:", e);
-    }
-  }, delay);
 }
 
 // Sync-down: pulls all rows for this user and overwrites local DB.
@@ -81,6 +58,7 @@ async function sbSyncDown() {
     fetchAll("events"),
   ]);
 
+  // overwrite local
   await DB.clearPlayers();
   await DB.clearSeasons();
   await DB.clearGames();
@@ -91,6 +69,7 @@ async function sbSyncDown() {
   for (const g of games) await DB.putGame(g);
   for (const e of events) await DB.putEvent(e);
 
+  // set current season if exists
   const current = seasons.find(x => !x.archived) || null;
   if (current) await DB.setSetting("current_season_id", current.season_id);
 
@@ -100,79 +79,44 @@ async function sbSyncDown() {
 // Sync-up: pushes queued ops from outbox
 async function sbSyncUp() {
   if (!supabaseReady()) return { pushed: 0, remaining: 0, note: "Supabase not configured" };
-
   const session = await sbGetSession();
-  const opsNow = await DB.listOps();
-
-  if (!session) return { pushed: 0, remaining: opsNow.length, note: "Not signed in" };
+  if (!session) return { pushed: 0, remaining: (await DB.listOps()).length, note: "Not signed in" };
   const owner_id = session.user.id;
 
-  const ops = opsNow;
+  const ops = await DB.listOps();
   let pushed = 0;
 
   for (const op of ops) {
     const { kind, payload } = op;
-
     try {
       if (kind === "upsert_player") {
         await sb().from("players").upsert({ ...payload, owner_id });
-
       } else if (kind === "upsert_season") {
         await sb().from("seasons").upsert({ ...payload, owner_id });
-
       } else if (kind === "upsert_game") {
         await sb().from("games").upsert({ ...payload, owner_id });
-
       } else if (kind === "upsert_event") {
         await sb().from("events").upsert({ ...payload, owner_id });
-
       } else if (kind === "delete_game") {
+        // delete game + events
         await sb().from("events").delete().eq("owner_id", owner_id).eq("game_id", payload.game_id);
         await sb().from("games").delete().eq("owner_id", owner_id).eq("game_id", payload.game_id);
-
       } else if (kind === "delete_event") {
         await sb().from("events").delete().eq("owner_id", owner_id).eq("event_id", payload.event_id);
-
       } else if (kind === "upsert_bulk_finalize") {
+        // used after finalize: upsert game + all events for the game
         await sb().from("games").upsert({ ...payload.game, owner_id });
         if (payload.events && payload.events.length) {
           const rows = payload.events.map(e => ({ ...e, owner_id }));
           await sb().from("events").upsert(rows);
         }
-
-      // ✅ STREAM OVERLAY STATE (THIS IS WHAT YOU'RE MISSING)
-      } else if (kind === "set_stream_state") {
-        // Make overlay show this game
-        await sb().from("stream_state").upsert({
-          id: "main",
-          owner_id,
-          active_game_id: payload.game_id
-        });
-
-      } else if (kind === "clear_stream_state") {
-        // Clear overlay (blank until next game)
-        await sb().from("stream_state").upsert({
-          id: "main",
-          owner_id,
-          active_game_id: null
-        });
-
-      } else {
-        // If we don't recognize the op, DON'T leave it forever.
-        console.warn("Unknown op kind, dropping:", kind);
       }
 
-      // Always delete the op once we've handled (or intentionally dropped) it
       await DB.deleteOp(op.op_id);
       pushed += 1;
-
     } catch (e) {
       // stop on first error to avoid burning requests
-      return {
-        pushed,
-        remaining: ops.length - pushed,
-        error: (e && e.message) ? e.message : String(e)
-      };
+      return { pushed, remaining: ops.length - pushed, error: (e && e.message) ? e.message : String(e) };
     }
   }
 
