@@ -1,4 +1,8 @@
-// UI + routing + live stat tracking (with Supabase cloud backup)
+// app.js — UI + routing + live stat tracking (with Supabase cloud backup)
+// NOTE: This version includes the stream overlay behavior you want:
+// - When a game starts: it sets stream_state so overlay loads that game immediately
+// - When a game finalizes: it clears stream_state so overlay blanks until next game starts
+
 let state = { route:"home", season:null, players:[], currentGame:null };
 
 function $(sel){ return document.querySelector(sel); }
@@ -114,7 +118,6 @@ async function init(){
     }
   });
 
-  
   $("#btnSignOut").addEventListener("click", async()=>{
     try{
       await sbSignOut();
@@ -126,7 +129,7 @@ async function init(){
     }
   });
 
-$("#btnSettings").addEventListener("click", async()=>{
+  $("#btnSettings").addEventListener("click", async()=>{
     const autoExport=await DB.getSetting("auto_export_finalize", false);
     const autoSync=await DB.getSetting("auto_sync_finalize", true);
     const last = await DB.getSetting("last_sync_at", null);
@@ -491,22 +494,30 @@ async function renderStart(app){
 
   const ready=(s.A.every(Boolean) && s.B.every(Boolean) && new Set([...s.A,...s.B]).size===4);
   c.appendChild(el("div",{class:"hr"}));
-  c.appendChild(el("button",{class:`btn ${ready?"ok":"ghost"}`, html:"Start", onclick:async()=>{
-  if(!ready) return;
+  c.appendChild(el("button",{
+    class:`btn ${ready?"ok":"ghost"}`,
+    html:"Start",
+    onclick: async()=>{
+      if(!ready) return;
 
-  const game = await DB.addGame(state.season.season_id, s.A, s.B);
+      const game = await DB.addGame(state.season.season_id, s.A, s.B);
 
-  // Push game immediately so the stream overlay can read roster/sides
-  await DB.enqueueOp("upsert_game", game);
+      // (Optional) keep this if you still want games saved to cloud later.
+      // Not required for overlay anymore.
+      await DB.enqueueOp("upsert_game", game);
 
-  // NEW: mark this as the active game for OBS overlay (multi-game streams)
-  await DB.enqueueOp("set_active_game", { game_id: game.game_id });
+      // NEW: tell overlay exactly what to display (game + rosters)
+      await DB.enqueueOp("set_stream_state", {
+        game_id: game.game_id,
+        sideA_player_ids: s.A,
+        sideB_player_ids: s.B
+      });
 
-  state.currentGame = game;
-  state._start = null;
-  setRoute("live");
-}}));
-  }}));
+      state.currentGame = game;
+      state._start = null;
+      setRoute("live");
+    }
+  }));
   app.appendChild(c);
 }
 
@@ -691,6 +702,9 @@ async function renderRecap(app){
 
     // queue a bulk finalize upsert (game + its events) for reliability
     await DB.enqueueOp("upsert_bulk_finalize", { game, events: evs });
+
+    // NEW: clear overlay after finalize so it goes blank until next game starts
+    await DB.enqueueOp("clear_stream_state", {});
 
     const auto=await DB.getSetting("auto_export_finalize", false);
     if(auto){
