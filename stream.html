@@ -1,16 +1,3 @@
-<!-- /stream.html  (single-file OBS overlay page)
-     1080p, full-width bottom bar, Side A left-aligned, Side B right-aligned,
-     subtle divider, white-on-dark, and a brief highlight pulse on any player update.
-
-     ✅ Uses window.SUPABASE_URL / window.SUPABASE_ANON_KEY if present.
-     ✅ Falls back to URL params ?supabaseUrl=...&supabaseKey=... (optional)
-
-     EXPECTED (editable) DB assumptions:
-       - stream_state table with a single row id='main' and column active_game_id
-       - games table has: id, side_a_score, side_b_score (or scores embedded)
-       - players table has: game_id, name, side ("Side A"/"Side B"), stat_line (already formatted like your app)
-     If your column names differ, edit the CONFIG section below.
--->
 <!doctype html>
 <html lang="en">
 <head>
@@ -21,7 +8,6 @@
     html, body { margin:0; padding:0; background: transparent; }
     body { overflow:hidden; }
 
-    /* Fixed OBS canvas */
     #overlay {
       width: 1920px;
       height: 1080px;
@@ -30,7 +16,6 @@
       color: #fff;
     }
 
-    /* Bottom bar */
     #bottomBar{
       position:absolute; left:0; right:0; bottom:0;
       height:190px;
@@ -42,7 +27,6 @@
       backdrop-filter: blur(6px);
     }
 
-    /* Players area */
     #playersArea{
       flex: 1;
       display:flex;
@@ -58,7 +42,6 @@
       min-width:0;
     }
 
-    /* Divider between Side A / Side B */
     .teamDivider{
       width:2px;
       margin: 0 18px;
@@ -71,7 +54,6 @@
       );
     }
 
-    /* Player cards */
     .playerCard{
       border-radius:14px;
       padding:10px 12px;
@@ -103,13 +85,11 @@
       font-variant-numeric: tabular-nums;
     }
 
-    /* Side alignment (broadcast style) */
     .sideA { text-align:left; }
     .sideB { text-align:right; }
     .sideA .playerCard { align-items:flex-start; }
     .sideB .playerCard { align-items:flex-end; }
 
-    /* Score area */
     #scoreArea{
       width:360px;
       border-radius:16px;
@@ -152,7 +132,6 @@
       text-align:center;
     }
 
-    /* Flash highlight pulse on update */
     .flash{
       animation: pulseHighlight 0.9s ease-out 1;
     }
@@ -162,7 +141,6 @@
       100% { background: rgba(255,255,255,0.08); transform: translateY(0px); }
     }
 
-    /* Small helper message if not configured */
     #status{
       position:absolute;
       left:18px; top:18px;
@@ -170,9 +148,10 @@
       border-radius:12px;
       background: rgba(0,0,0,0.55);
       font-size:16px;
-      max-width: 820px;
+      max-width: 920px;
       line-height: 1.25;
       display:none;
+      z-index: 9999;
     }
   </style>
 </head>
@@ -201,36 +180,47 @@
     </div>
   </div>
 
-  <!-- Inline config (you can keep this, or move to config.js if you want) -->
+  <!-- You can keep these here OR load config.js that sets them -->
   <script>
     window.SUPABASE_URL = "https://mpvzicatxjzoaxtlieyw.supabase.co";
-    window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wdnppY2F0eGp6b2F4dGxpZXl3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMzEyOTcsImV4cCI6MjA4NzcwNzI5N30.QmpgY48F1_5OBeW0J8HQ_TDWfFy_rds-vnlDRtpFEqk";
+    window.SUPABASE_ANON_KEY = "PASTE_YOUR_ANON_KEY_HERE_IF_YOU_WANT";
+    // OPTIONAL (recommended for multi-user safety):
+    // window.OVERLAY_OWNER_ID = "YOUR_AUTH_UID";
   </script>
 
-  <!-- Supabase JS (UMD) - LOAD ONCE -->
+  <!-- Load Supabase ONCE -->
   <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 
   <script>
     /********************
-     * CONFIG (EDIT IF NEEDED)
+     * CONFIG (matches YOUR schema)
      ********************/
     const CONFIG = {
+      GAMES_TABLE: "games",
+      EVENTS_TABLE: "events",
+      PLAYERS_TABLE: "players",
       STREAM_STATE_TABLE: "stream_state",
+
       STREAM_STATE_PK_COL: "id",
       STREAM_STATE_PK_VAL: "main",
       STREAM_STATE_ACTIVE_GAME_COL: "active_game_id",
+      STREAM_STATE_OWNER_COL: "owner_id",
 
-      GAMES_TABLE: "games",
-      GAME_ID_COL: "game_id",              // <-- IMPORTANT: your app uses game_id, not id
-      GAME_SIDE_A_SCORE_COL: "final_score_a", // <-- if you want live score, you need an actual column or compute from events
-      GAME_SIDE_B_SCORE_COL: "final_score_b",
+      GAMES_ID_COL: "game_id",
+      GAMES_SIDEA_COL: "sidea_player_ids",
+      GAMES_SIDEB_COL: "sideb_player_ids",
+      GAMES_OWNER_COL: "owner_id",
 
-      PLAYERS_TABLE: "players",
-      PLAYER_GAME_ID_COL: "game_id",
-      PLAYER_ID_COL: "player_id",
-      PLAYER_NAME_COL: "name",
-      PLAYER_SIDE_COL: "side",              // expect "Side A" / "Side B"
-      PLAYER_STATLINE_COL: "stat_line"      // already formatted string (like your app)
+      EVENTS_GAME_COL: "game_id",
+      EVENTS_PLAYER_COL: "player_id",
+      EVENTS_TYPE_COL: "stat_type",
+      EVENTS_DELTA_COL: "delta",
+      EVENTS_TS_COL: "timestamp",
+      EVENTS_OWNER_COL: "owner_id",
+
+      PLAYERS_ID_COL: "player_id",
+      PLAYERS_NAME_COL: "name",
+      PLAYERS_OWNER_COL: "owner_id",
     };
 
     /********************
@@ -243,13 +233,10 @@
     const sideBScoreEl = document.getElementById("sideBScore");
 
     function setStatus(msg){
-      statusEl.textContent = msg;
+      statusEl.textContent = msg || "";
       statusEl.style.display = msg ? "block" : "none";
     }
 
-    /********************
-     * HELPERS
-     ********************/
     function escapeHtml(s){
       return String(s ?? "")
         .replaceAll("&","&amp;")
@@ -259,167 +246,258 @@
         .replaceAll("'","&#039;");
     }
 
-    function cardHTML(player){
-      const id = player[CONFIG.PLAYER_ID_COL];
-      const name = player[CONFIG.PLAYER_NAME_COL] ?? "—";
-      const line = player[CONFIG.PLAYER_STATLINE_COL] ?? "";
-      return `
-        <div class="playerCard" id="player-${escapeHtml(id)}">
-          <div class="playerName">${escapeHtml(name)}</div>
-          <div class="playerLine">${escapeHtml(line)}</div>
-        </div>
-      `;
+    function getParam(name){
+      const url = new URL(window.location.href);
+      return url.searchParams.get(name);
     }
 
-    function flashPlayer(playerId){
-      const el = document.getElementById(`player-${playerId}`);
+    /********************
+     * SUPABASE INIT (no naming collision)
+     ********************/
+    const SUPABASE_URL = window.SUPABASE_URL || getParam("supabaseUrl") || "";
+    const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || getParam("supabaseKey") || "";
+
+    // Owner scoping (optional but recommended)
+    const OVERLAY_OWNER_ID =
+      window.OVERLAY_OWNER_ID ||
+      getParam("ownerId") ||
+      "";
+
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY){
+      setStatus("Overlay not configured. Set window.SUPABASE_URL and window.SUPABASE_ANON_KEY (or use ?supabaseUrl=...&supabaseKey=...).");
+    }
+
+    // IMPORTANT: do NOT call this variable `supabase`
+    const sbClient = (SUPABASE_URL && SUPABASE_ANON_KEY)
+      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+      : null;
+
+    /********************
+     * STAT COMPUTATION (matches your app)
+     ********************/
+    const STAT_TYPES = ["2PM","2PMISS","3PM","3PMISS","AST","OREB","DREB","BLK","STL"];
+
+    function computeFromEvents(gameRow, events){
+      const sideA = gameRow?.[CONFIG.GAMES_SIDEA_COL] || [];
+      const sideB = gameRow?.[CONFIG.GAMES_SIDEB_COL] || [];
+
+      const lines = new Map();
+      for (const pid of [...sideA, ...sideB]){
+        const o = {};
+        for (const s of STAT_TYPES) o[s] = 0;
+        lines.set(String(pid), o);
+      }
+
+      for (const ev of (events || [])){
+        const pid = String(ev[CONFIG.EVENTS_PLAYER_COL]);
+        const stat = ev[CONFIG.EVENTS_TYPE_COL];
+        const delta = Number(ev[CONFIG.EVENTS_DELTA_COL] ?? 1);
+        const line = lines.get(pid);
+        if (!line) continue;
+        line[stat] = (line[stat] || 0) + delta;
+      }
+
+      const derived = (pid)=>{
+        const l = lines.get(String(pid)) || {};
+        const twoA = (l["2PM"]||0) + (l["2PMISS"]||0);
+        const threeA = (l["3PM"]||0) + (l["3PMISS"]||0);
+        const pts = (l["2PM"]||0)*2 + (l["3PM"]||0)*3;
+        const reb = (l["OREB"]||0) + (l["DREB"]||0);
+        return { twoA, threeA, pts, reb };
+      };
+
+      const scoreA = sideA.reduce((s,p)=> s + derived(p).pts, 0);
+      const scoreB = sideB.reduce((s,p)=> s + derived(p).pts, 0);
+
+      return { sideA, sideB, lines, derived, scoreA, scoreB };
+    }
+
+    function formatStatLine(pid, box){
+      const line = box.lines.get(String(pid)) || {};
+      const d = box.derived(pid);
+      const pts = d.pts;
+      const twoM = line["2PM"] || 0;
+      const threeM = line["3PM"] || 0;
+      const oreb = line["OREB"] || 0;
+      const dreb = line["DREB"] || 0;
+      const reb = (oreb + dreb);
+      const ast = line["AST"] || 0;
+      const stl = line["STL"] || 0;
+      const blk = line["BLK"] || 0;
+
+      return `PTS ${pts} | 2s ${twoM}-${d.twoA} | 3s ${threeM}-${d.threeA} | REB ${reb} (O${oreb}/D${dreb}) | AST ${ast} | STL ${stl} | BLK ${blk}`;
+    }
+
+    /********************
+     * RENDER
+     ********************/
+    let lastLineByPid = new Map();
+
+    function flashPlayer(pid){
+      const el = document.getElementById(`player-${pid}`);
       if (!el) return;
       el.classList.remove("flash");
       void el.offsetWidth;
       el.classList.add("flash");
     }
 
-    /********************
-     * SUPABASE INIT (NO NAME COLLISION)
-     ********************/
-    function getParam(name){
-      const url = new URL(window.location.href);
-      return url.searchParams.get(name);
+    function playerCardHTML(pid, name, line){
+      return `
+        <div class="playerCard" id="player-${escapeHtml(pid)}">
+          <div class="playerName">${escapeHtml(name)}</div>
+          <div class="playerLine">${escapeHtml(line)}</div>
+        </div>
+      `;
     }
 
-    const SUPABASE_URL =
-      window.SUPABASE_URL ||
-      getParam("supabaseUrl") ||
-      "";
+    function renderOverlay(box, nameById){
+      sideAScoreEl.textContent = String(box.scoreA ?? 0);
+      sideBScoreEl.textContent = String(box.scoreB ?? 0);
 
-    const SUPABASE_ANON_KEY =
-      window.SUPABASE_ANON_KEY ||
-      getParam("supabaseKey") ||
-      "";
+      const sideAHtml = box.sideA.map(pid => {
+        const id = String(pid);
+        const nm = nameById.get(id) || "—";
+        const ln = formatStatLine(id, box);
+        return playerCardHTML(id, nm, ln);
+      }).join("");
 
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY){
-      setStatus("Overlay not configured. Set window.SUPABASE_URL and window.SUPABASE_ANON_KEY, or load with ?supabaseUrl=...&supabaseKey=...");
-    }
+      const sideBHtml = box.sideB.map(pid => {
+        const id = String(pid);
+        const nm = nameById.get(id) || "—";
+        const ln = formatStatLine(id, box);
+        return playerCardHTML(id, nm, ln);
+      }).join("");
 
-    // IMPORTANT: do NOT name this `supabase`
-    const sbClient = (SUPABASE_URL && SUPABASE_ANON_KEY)
-      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-      : null;
+      sideACol.innerHTML = sideAHtml;
+      sideBCol.innerHTML = sideBHtml;
 
-    /********************
-     * RENDER + HIGHLIGHT
-     ********************/
-    let lastStatByPlayerId = new Map();
-
-    function render(gameRow, players){
-      const a = gameRow?.[CONFIG.GAME_SIDE_A_SCORE_COL] ?? 0;
-      const b = gameRow?.[CONFIG.GAME_SIDE_B_SCORE_COL] ?? 0;
-      sideAScoreEl.textContent = a;
-      sideBScoreEl.textContent = b;
-
-      const sideA = (players || []).filter(p => (p[CONFIG.PLAYER_SIDE_COL] ?? "").toLowerCase() === "side a");
-      const sideB = (players || []).filter(p => (p[CONFIG.PLAYER_SIDE_COL] ?? "").toLowerCase() === "side b");
-
-      sideACol.innerHTML = sideA.map(cardHTML).join("");
-      sideBCol.innerHTML = sideB.map(cardHTML).join("");
-
-      for (const p of (players || [])){
-        const pid = p[CONFIG.PLAYER_ID_COL];
-        const newLine = p[CONFIG.PLAYER_STATLINE_COL] ?? "";
-        const oldLine = lastStatByPlayerId.get(pid);
-        if (oldLine !== undefined && oldLine !== newLine){
-          flashPlayer(pid);
-        }
-        lastStatByPlayerId.set(pid, newLine);
+      // highlight changed stat lines
+      for (const pid of [...box.sideA, ...box.sideB]){
+        const id = String(pid);
+        const ln = formatStatLine(id, box);
+        const prev = lastLineByPid.get(id);
+        if (prev !== undefined && prev !== ln) flashPlayer(id);
+        lastLineByPid.set(id, ln);
       }
     }
 
     /********************
-     * DATA FETCH
+     * DATA LOADERS
      ********************/
     let activeGameId = null;
-    let liveGameChannel = null;
-    let refreshTimer = null;
+    let chanStream = null;
+    let chanLive = null;
 
-    function throttleRefresh(ms=250){
-      if (refreshTimer) return;
-      refreshTimer = setTimeout(async () => {
-        refreshTimer = null;
-        if (activeGameId) await loadGame(activeGameId);
-      }, ms);
+    function ownerEq(q, col){
+      return OVERLAY_OWNER_ID ? q.eq(col, OVERLAY_OWNER_ID) : q;
     }
 
     async function loadActiveGameId(){
-      const { data, error } = await sbClient
+      let q = sbClient
         .from(CONFIG.STREAM_STATE_TABLE)
         .select(`${CONFIG.STREAM_STATE_ACTIVE_GAME_COL}`)
-        .eq(CONFIG.STREAM_STATE_PK_COL, CONFIG.STREAM_STATE_PK_VAL)
-        .single();
+        .eq(CONFIG.STREAM_STATE_PK_COL, CONFIG.STREAM_STATE_PK_VAL);
 
+      q = ownerEq(q, CONFIG.STREAM_STATE_OWNER_COL);
+
+      const { data, error } = await q.single();
       if (error){
-        setStatus("Could not read stream_state. Check table/columns + RLS policy.");
+        setStatus("Could not read stream_state (RLS?). If you use RLS, pass ?ownerId=YOUR_UID or set window.OVERLAY_OWNER_ID.");
         console.error(error);
         return null;
       }
       setStatus("");
-      return data?.[CONFIG.STREAM_STATE_ACTIVE_GAME_COL] ?? null;
+      return data?.[CONFIG.STREAM_STATE_ACTIVE_GAME_COL] || null;
     }
 
-    async function loadGame(gameId){
-      // Fetch game
-      const { data: gameRow, error: gameErr } = await sbClient
+    async function loadGameAndRender(gameId){
+      if (!gameId) return;
+
+      // GAME
+      let gq = sbClient
         .from(CONFIG.GAMES_TABLE)
         .select("*")
-        .eq(CONFIG.GAME_ID_COL, gameId)
-        .single();
+        .eq(CONFIG.GAMES_ID_COL, gameId);
 
+      gq = ownerEq(gq, CONFIG.GAMES_OWNER_COL);
+
+      const { data: gameRow, error: gameErr } = await gq.single();
       if (gameErr){
-        setStatus("Could not load active game row. Check games table/columns + RLS policy.");
+        setStatus("Could not load games row for active_game_id (RLS? wrong id?).");
         console.error(gameErr);
         return;
       }
 
-      // Fetch players (ONLY works if you actually store per-game player rows in `players`)
-      const { data: players, error: playersErr } = await sbClient
-        .from(CONFIG.PLAYERS_TABLE)
-        .select("*")
-        .eq(CONFIG.PLAYER_GAME_ID_COL, gameId);
+      const sideA = gameRow?.[CONFIG.GAMES_SIDEA_COL] || [];
+      const sideB = gameRow?.[CONFIG.GAMES_SIDEB_COL] || [];
+      const allPids = [...sideA, ...sideB].map(String);
 
-      if (playersErr){
-        setStatus("Could not load players. Check players table/columns + RLS policy.");
-        console.error(playersErr);
+      // PLAYERS (names)
+      let pq = sbClient
+        .from(CONFIG.PLAYERS_TABLE)
+        .select(`${CONFIG.PLAYERS_ID_COL}, ${CONFIG.PLAYERS_NAME_COL}`)
+        .in(CONFIG.PLAYERS_ID_COL, allPids);
+
+      pq = ownerEq(pq, CONFIG.PLAYERS_OWNER_COL);
+
+      const { data: playerRows, error: pErr } = await pq;
+      if (pErr){
+        setStatus("Could not load players (RLS?).");
+        console.error(pErr);
         return;
       }
 
-      render(gameRow, players || []);
+      const nameById = new Map((playerRows || []).map(r => [String(r[CONFIG.PLAYERS_ID_COL]), r[CONFIG.PLAYERS_NAME_COL]]));
+
+      // EVENTS (for live score + stats)
+      let eq = sbClient
+        .from(CONFIG.EVENTS_TABLE)
+        .select("*")
+        .eq(CONFIG.EVENTS_GAME_COL, gameId)
+        .order(CONFIG.EVENTS_TS_COL, { ascending: true });
+
+      eq = ownerEq(eq, CONFIG.EVENTS_OWNER_COL);
+
+      const { data: events, error: eErr } = await eq;
+      if (eErr){
+        setStatus("Could not load events for the active game (RLS?).");
+        console.error(eErr);
+        return;
+      }
+
+      const box = computeFromEvents(gameRow, events || []);
+      renderOverlay(box, nameById);
     }
 
     /********************
-     * REALTIME SUBSCRIPTIONS
+     * REALTIME
      ********************/
+    let refreshTimer = null;
+    function throttleRefresh(ms=120){
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(async () => {
+        refreshTimer = null;
+        if (activeGameId) await loadGameAndRender(activeGameId);
+      }, ms);
+    }
+
     async function subscribeStreamState(){
-      sbClient
-        .channel("stream_state_changes")
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: CONFIG.STREAM_STATE_TABLE,
-            filter: `${CONFIG.STREAM_STATE_PK_COL}=eq.${CONFIG.STREAM_STATE_PK_VAL}`
-          },
+      if (chanStream){
+        try { await sbClient.removeChannel(chanStream); } catch(e){}
+        chanStream = null;
+      }
+
+      const filterParts = [`${CONFIG.STREAM_STATE_PK_COL}=eq.${CONFIG.STREAM_STATE_PK_VAL}`];
+      if (OVERLAY_OWNER_ID) filterParts.push(`${CONFIG.STREAM_STATE_OWNER_COL}=eq.${OVERLAY_OWNER_ID}`);
+      const filter = filterParts.join(",");
+
+      chanStream = sbClient
+        .channel("overlay_stream_state")
+        .on("postgres_changes",
+          { event:"*", schema:"public", table: CONFIG.STREAM_STATE_TABLE, filter },
           async (payload) => {
-            const next = payload.new?.[CONFIG.STREAM_STATE_ACTIVE_GAME_COL] ?? null;
+            const next = payload.new?.[CONFIG.STREAM_STATE_ACTIVE_GAME_COL] || null;
             if (next !== activeGameId){
-              if (!next){
-                activeGameId = null;
-                sideAScoreEl.textContent = "0";
-                sideBScoreEl.textContent = "0";
-                sideACol.innerHTML = "";
-                sideBCol.innerHTML = "";
-                setStatus("No active game set yet.");
-                return;
-              }
               await switchActiveGame(next);
             }
           }
@@ -427,32 +505,30 @@
         .subscribe();
     }
 
-    async function subscribeLiveGame(gameId){
-      if (liveGameChannel){
-        try { await sbClient.removeChannel(liveGameChannel); } catch(e){}
-        liveGameChannel = null;
+    async function subscribeLive(gameId){
+      if (chanLive){
+        try { await sbClient.removeChannel(chanLive); } catch(e){}
+        chanLive = null;
       }
 
-      liveGameChannel = sbClient
-        .channel(`live_game_${gameId}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: CONFIG.GAMES_TABLE,
-            filter: `${CONFIG.GAME_ID_COL}=eq.${gameId}`
-          },
-          () => throttleRefresh(120)
+      // events changes for this game
+      const fEventsParts = [`${CONFIG.EVENTS_GAME_COL}=eq.${gameId}`];
+      if (OVERLAY_OWNER_ID) fEventsParts.push(`${CONFIG.EVENTS_OWNER_COL}=eq.${OVERLAY_OWNER_ID}`);
+      const fEvents = fEventsParts.join(",");
+
+      // game changes (rosters etc)
+      const fGameParts = [`${CONFIG.GAMES_ID_COL}=eq.${gameId}`];
+      if (OVERLAY_OWNER_ID) fGameParts.push(`${CONFIG.GAMES_OWNER_COL}=eq.${OVERLAY_OWNER_ID}`);
+      const fGame = fGameParts.join(",");
+
+      chanLive = sbClient
+        .channel(`overlay_live_${gameId}`)
+        .on("postgres_changes",
+          { event:"*", schema:"public", table: CONFIG.EVENTS_TABLE, filter: fEvents },
+          () => throttleRefresh(90)
         )
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: CONFIG.PLAYERS_TABLE,
-            filter: `${CONFIG.PLAYER_GAME_ID_COL}=eq.${gameId}`
-          },
+        .on("postgres_changes",
+          { event:"*", schema:"public", table: CONFIG.GAMES_TABLE, filter: fGame },
           () => throttleRefresh(120)
         )
         .subscribe();
@@ -460,9 +536,20 @@
 
     async function switchActiveGame(gameId){
       activeGameId = gameId;
-      lastStatByPlayerId = new Map();
-      await subscribeLiveGame(gameId);
-      await loadGame(gameId);
+      lastLineByPid = new Map();
+
+      if (!activeGameId){
+        sideAScoreEl.textContent = "0";
+        sideBScoreEl.textContent = "0";
+        sideACol.innerHTML = "";
+        sideBCol.innerHTML = "";
+        setStatus("No active game set yet.");
+        return;
+      }
+
+      setStatus("");
+      await subscribeLive(activeGameId);
+      await loadGameAndRender(activeGameId);
     }
 
     /********************
@@ -475,9 +562,10 @@
 
       const gid = await loadActiveGameId();
       if (!gid){
-        setStatus("No active game set yet. Set stream_state.active_game_id to a game id.");
+        setStatus("No active game set (stream_state.active_game_id is null). Start a game in the app.");
         return;
       }
+
       await switchActiveGame(gid);
     })();
   </script>
