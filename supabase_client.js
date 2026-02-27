@@ -39,6 +39,43 @@ async function sbSignOut() {
   try { await sb().auth.signOut(); } catch {}
 }
 
+/* =========================================================
+   AUTO-SYNC (NEW)
+   - Schedules sbSyncUp() automatically after local ops queue
+   - Debounced to avoid spamming network
+   - Safe offline: failures keep ops queued
+========================================================= */
+let AUTO_SYNC_TIMER = null;
+
+// Optional global toggle if you ever want it:
+// window.AUTO_SYNC_ENABLED = true;  // default true if not set
+function autoSyncEnabled() {
+  return window.AUTO_SYNC_ENABLED !== false;
+}
+
+function scheduleAutoSync(delay = 400) {
+  if (!autoSyncEnabled()) return;
+  clearTimeout(AUTO_SYNC_TIMER);
+  AUTO_SYNC_TIMER = setTimeout(async () => {
+    try {
+      await sbSyncUp();
+    } catch (e) {
+      console.warn("Auto-sync failed:", e);
+    }
+  }, delay);
+}
+
+/* =========================================================
+   IMPORTANT INTEGRATION NOTE (NEW)
+   ---------------------------------------------------------
+   This file cannot know *where* you create outbox ops.
+   You must call scheduleAutoSync() immediately after you add
+   an op to your outbox (e.g., after DB.addOp / DB.putOp).
+   Example (in your stat tap handler):
+     await DB.addOp({ kind:"upsert_event", payload: evt });
+     scheduleAutoSync();
+========================================================= */
+
 // Sync-down: pulls all rows for this user and overwrites local DB.
 async function sbSyncDown() {
   const session = await sbGetSession();
@@ -133,4 +170,13 @@ async function sbHealth() {
     email: session?.user?.email || null,
     pending_ops: ops.length
   };
+}
+
+/* =========================================================
+   OPTIONAL (NEW): helper you can call instead of manual Sync
+========================================================= */
+async function sbSyncUpAndReport() {
+  const res = await sbSyncUp();
+  // If you have a toast system, you could show res.note or res.error here.
+  return res;
 }
