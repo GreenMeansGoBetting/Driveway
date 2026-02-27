@@ -492,12 +492,20 @@ async function renderStart(app){
   const ready=(s.A.every(Boolean) && s.B.every(Boolean) && new Set([...s.A,...s.B]).size===4);
   c.appendChild(el("div",{class:"hr"}));
   c.appendChild(el("button",{class:`btn ${ready?"ok":"ghost"}`, html:"Start", onclick:async()=>{
-    if(!ready) return;
-    const game=await DB.addGame(state.season.season_id, s.A, s.B);
-    await DB.enqueueOp("upsert_game", game);
-    state.currentGame=game;
-    state._start=null;
-    setRoute("live");
+  if(!ready) return;
+
+  const game = await DB.addGame(state.season.season_id, s.A, s.B);
+
+  // Push game immediately so the stream overlay can read roster/sides
+  await DB.enqueueOp("upsert_game", game);
+
+  // NEW: mark this as the active game for OBS overlay (multi-game streams)
+  await DB.enqueueOp("set_active_game", { game_id: game.game_id });
+
+  state.currentGame = game;
+  state._start = null;
+  setRoute("live");
+}}));
   }}));
   app.appendChild(c);
 }
