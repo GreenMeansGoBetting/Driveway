@@ -1,98 +1,102 @@
 // app.js — UI + routing + live stat tracking (with Supabase cloud backup)
-// NOTE: This version includes the stream overlay behavior you want:
-// - When a game starts: it sets stream_state so overlay loads that game immediately
-// - When a game finalizes: it clears stream_state so overlay blanks until next game starts
+// Includes stream overlay behavior:
+// - When a game starts: sets stream_state.active_game_id so overlay loads that game immediately
+// - When a game finalizes: clears stream_state.active_game_id so overlay blanks until next game starts
+//
+// ALSO includes auto-sync triggers:
+// - Every time we enqueue an outbox op, we call scheduleAutoSync()
+//   (so the queue doesn't grow forever and cloud stays current)
 
-let state = { route:"home", season:null, players:[], currentGame:null };
-// app.js — UI + routing + live stat tracking (with Supabase cloud backup)
-// NOTE: This version includes the stream overlay behavior you want:
-// - When a game starts: it sets stream_state so overlay loads that game immediately
-// - When a game finalizes: it clears stream_state so overlay blanks until next game starts
+"use strict";
 
-let state = { route:"home", season:null, players:[], currentGame:null };
-// ===== AUTO CLOUD PUSH (SIMPLE + ALWAYS ON) =====
-window.AUTO_SYNC_ENABLED = true;
+let state = { route: "home", season: null, players: [], currentGame: null };
 
-const _origEnqueueOp = DB.enqueueOp;
-DB.enqueueOp = async function(kind, payload){
-  const res = await _origEnqueueOp.call(DB, kind, payload);
+function $(sel) { return document.querySelector(sel); }
 
-  // Immediately push to Supabase (no manual Sync needed)
-  try {
-    if (typeof scheduleAutoSync === "function") {
-      scheduleAutoSync(50); // tiny debounce
-    }
-  } catch (e) {
-    console.warn("Auto sync failed:", e);
+function el(tag, attrs = {}, children = []) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k === "html") n.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
   }
-
-  return res;
-};
-// ================================================
-
-function $(sel){ return document.querySelector(sel); }
-function el(tag, attrs={}, children=[]){
-  const n=document.createElement(tag);
-  for(const [k,v] of Object.entries(attrs)){
-    if(k==="class") n.className=v;
-    else if(k==="html") n.innerHTML=v;
-    else if(k.startsWith("on") && typeof v==="function") n.addEventListener(k.slice(2), v);
-    else n.setAttribute(k,v);
-  }
-  for(const c of children) n.appendChild(c);
+  for (const c of children) n.appendChild(c);
   return n;
 }
 
-function setRoute(r){
-  state.route=r;
-  document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active", b.dataset.route===r));
-  render();
+// Safety wrapper so a render error doesn't brick the whole page.
+async function safe(fn) {
+  try { return await fn(); }
+  catch (e) {
+    console.error(e);
+    const app = $("#app");
+    if (app) {
+      app.innerHTML = "";
+      const card = el("div", { class: "card section" });
+      card.appendChild(el("div", { class: "h1", html: "App Error" }));
+      card.appendChild(el("div", { class: "p", html: "A runtime error occurred. Open DevTools Console to see details." }));
+      card.appendChild(el("div", { class: "p", html: `<pre style="white-space:pre-wrap; opacity:.8;">${(e && e.message) ? e.message : String(e)}</pre>` }));
+      card.appendChild(el("button", { class: "btn", html: "Reload", onclick: () => location.reload() }));
+      app.appendChild(card);
+    }
+  }
 }
 
-function showModal(title, bodyHtml, actions){
-  $("#modalBackdrop").hidden=false;
-  $("#modal").hidden=false;
-  const m=$("#modal"); m.innerHTML="";
-  m.appendChild(el("div",{class:"h2", html:title}));
-  m.appendChild(el("div",{class:"p", html:bodyHtml}));
-  const row=el("div",{class:"row", style:"justify-content:flex-end; margin-top:12px; gap:10px;"});
-  for(const a of actions){
-    row.appendChild(el("button",{class:`btn ${a.kind||"ghost"}`, html:a.label, onclick:()=>{ hideModal(); a.onClick && a.onClick(); }}));
+function setRoute(r) {
+  state.route = r;
+  document.querySelectorAll(".nav-btn").forEach(b => b.classList.toggle("active", b.dataset.route === r));
+  safe(render);
+}
+
+function showModal(title, bodyHtml, actions) {
+  $("#modalBackdrop").hidden = false;
+  $("#modal").hidden = false;
+  const m = $("#modal"); m.innerHTML = "";
+  m.appendChild(el("div", { class: "h2", html: title }));
+  m.appendChild(el("div", { class: "p", html: bodyHtml }));
+  const row = el("div", { class: "row", style: "justify-content:flex-end; margin-top:12px; gap:10px;" });
+  for (const a of actions) {
+    row.appendChild(el("button", {
+      class: `btn ${a.kind || "ghost"}`,
+      html: a.label,
+      onclick: () => { hideModal(); a.onClick && a.onClick(); }
+    }));
   }
   m.appendChild(row);
-  $("#modalBackdrop").onclick=hideModal;
+  $("#modalBackdrop").onclick = hideModal;
 }
-function hideModal(){ $("#modalBackdrop").hidden=true; $("#modal").hidden=true; }
+function hideModal() { $("#modalBackdrop").hidden = true; $("#modal").hidden = true; }
 
-function computeFromEvents(game, events){
-  const statTypes=["2PM","2PMISS","3PM","3PMISS","AST","OREB","DREB","BLK","STL"];
-  const lines=new Map();
-  for(const pid of [...game.sideA_player_ids, ...game.sideB_player_ids]){
-    const o={}; for(const s of statTypes) o[s]=0; lines.set(pid,o);
+function computeFromEvents(game, events) {
+  const statTypes = ["2PM", "2PMISS", "3PM", "3PMISS", "AST", "OREB", "DREB", "BLK", "STL"];
+  const lines = new Map();
+  for (const pid of [...game.sideA_player_ids, ...game.sideB_player_ids]) {
+    const o = {}; for (const s of statTypes) o[s] = 0; lines.set(pid, o);
   }
-  for(const ev of events){
-    const line=lines.get(ev.player_id); if(!line) continue;
-    line[ev.stat_type]=(line[ev.stat_type]||0)+(ev.delta||1);
+  for (const ev of events) {
+    const line = lines.get(ev.player_id); if (!line) continue;
+    line[ev.stat_type] = (line[ev.stat_type] || 0) + (ev.delta || 1);
   }
-  const derived=(pid)=>{
-    const l=lines.get(pid);
-    const twoA=l["2PM"]+l["2PMISS"];
-    const threeA=l["3PM"]+l["3PMISS"];
-    const pts=l["2PM"]*2 + l["3PM"]*3;
-    const reb=l["OREB"]+l["DREB"];
-    return {twoA, threeA, pts, reb};
+  const derived = (pid) => {
+    const l = lines.get(pid);
+    const twoA = l["2PM"] + l["2PMISS"];
+    const threeA = l["3PM"] + l["3PMISS"];
+    const pts = l["2PM"] * 2 + l["3PM"] * 3;
+    const reb = l["OREB"] + l["DREB"];
+    return { twoA, threeA, pts, reb };
   };
-  const scoreA=game.sideA_player_ids.reduce((s,p)=>s+derived(p).pts,0);
-  const scoreB=game.sideB_player_ids.reduce((s,p)=>s+derived(p).pts,0);
-  const lead=Math.abs(scoreA-scoreB);
-  const canFinalize=(Math.max(scoreA,scoreB)>=40)&&(lead>=3);
-  const winner_side=scoreA>scoreB?"A":"B";
-  return {lines, derived, scoreA, scoreB, lead, canFinalize, winner_side};
+  const scoreA = game.sideA_player_ids.reduce((s, p) => s + derived(p).pts, 0);
+  const scoreB = game.sideB_player_ids.reduce((s, p) => s + derived(p).pts, 0);
+  const lead = Math.abs(scoreA - scoreB);
+  const canFinalize = (Math.max(scoreA, scoreB) >= 40) && (lead >= 3);
+  const winner_side = scoreA > scoreB ? "A" : "B";
+  return { lines, derived, scoreA, scoreB, lead, canFinalize, winner_side };
 }
 
-async function refreshPlayers(){ state.players=await DB.listPlayers(true); }
+async function refreshPlayers() { state.players = await DB.listPlayers(true); }
 
-async function ensureSeason(){
+async function ensureSeason() {
   // prefer stored season id
   const sid = await DB.getSetting("current_season_id", null);
   if (sid) {
@@ -105,23 +109,23 @@ async function ensureSeason(){
   return s;
 }
 
-async function updateHeaderSeason(){
+async function updateHeaderSeason() {
   state.season = await ensureSeason();
   $("#seasonSub").textContent = `Season: ${state.season.name}`;
 }
 
-async function init(){
-  document.querySelectorAll(".nav-btn").forEach(b=>b.addEventListener("click", ()=>setRoute(b.dataset.route)));
+async function init() {
+  document.querySelectorAll(".nav-btn").forEach(b => b.addEventListener("click", () => setRoute(b.dataset.route)));
 
-  $("#btnExportQuick").addEventListener("click", async()=>{ if(state.season) await exportSeason(state.season); });
+  $("#btnExportQuick").addEventListener("click", async () => { if (state.season) await exportSeason(state.season); });
 
-  $("#btnSync").addEventListener("click", async()=>{
-    try{
+  $("#btnSync").addEventListener("click", async () => {
+    try {
       const health = await sbHealth();
       if (!health.configured) {
         showModal("Cloud not configured",
           "Paste your Supabase URL + anon key into <b>config.js</b> (see README).",
-          [{label:"OK", kind:"ghost"}]
+          [{ label: "OK", kind: "ghost" }]
         );
         return;
       }
@@ -135,28 +139,31 @@ async function init(){
       await DB.setSetting("last_sync_at", new Date().toISOString());
       hideModal();
       await updateHeaderSeason();
-      render();
-      showModal("Sync complete", `Pushed: <b>${up.pushed}</b><br/>Cloud rows pulled: players ${down.players}, seasons ${down.seasons}, games ${down.games}, events ${down.events}`, [{label:"OK", kind:"ghost"}]);
-    } catch(e){
+      await render();
+      showModal("Sync complete",
+        `Pushed: <b>${up.pushed}</b><br/>Cloud rows pulled: players ${down.players}, seasons ${down.seasons}, games ${down.games}, events ${down.events}`,
+        [{ label: "OK", kind: "ghost" }]
+      );
+    } catch (e) {
       hideModal();
-      showModal("Sync error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+      showModal("Sync error", (e && e.message) ? e.message : String(e), [{ label: "OK", kind: "ghost" }]);
     }
   });
 
-  $("#btnSignOut").addEventListener("click", async()=>{
-    try{
+  $("#btnSignOut").addEventListener("click", async () => {
+    try {
       await sbSignOut();
       await DB.setSetting("last_sync_at", null);
       setRoute("home");
-      render();
-    } catch(e){
-      showModal("Sign out error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+      await render();
+    } catch (e) {
+      showModal("Sign out error", (e && e.message) ? e.message : String(e), [{ label: "OK", kind: "ghost" }]);
     }
   });
 
-  $("#btnSettings").addEventListener("click", async()=>{
-    const autoExport=await DB.getSetting("auto_export_finalize", false);
-    const autoSync=await DB.getSetting("auto_sync_finalize", true);
+  $("#btnSettings").addEventListener("click", async () => {
+    const autoExport = await DB.getSetting("auto_export_finalize", false);
+    const autoSync = await DB.getSetting("auto_sync_finalize", true);
     const last = await DB.getSetting("last_sync_at", null);
     const lastTxt = last ? new Date(last).toLocaleString() : "—";
 
@@ -170,7 +177,7 @@ async function init(){
           <span class="muted">If enabled, finalize will download game files (optional).</span>
         </div>
         <label class="switch">
-          <input type="checkbox" id="toggleAutoExport" ${autoExport?"checked":""}/>
+          <input type="checkbox" id="toggleAutoExport" ${autoExport ? "checked" : ""}/>
           <span class="slider"></span>
         </label>
       </div>
@@ -183,7 +190,7 @@ async function init(){
           <span class="muted">Finalize will automatically push changes to the cloud.</span>
         </div>
         <label class="switch">
-          <input type="checkbox" id="toggleAutoSync" ${autoSync?"checked":""}/>
+          <input type="checkbox" id="toggleAutoSync" ${autoSync ? "checked" : ""}/>
           <span class="slider"></span>
         </label>
       </div>
@@ -213,52 +220,52 @@ async function init(){
       <div class="row" style="justify-content:space-between; align-items:center;">
         <div>
           <b>Account</b><br/>
-          <span class="muted">${signedIn ? ("Signed in as "+h.email) : "Not signed in"}</span>
+          <span class="muted">${signedIn ? ("Signed in as " + h.email) : "Not signed in"}</span>
         </div>
-        <button class="btn danger" id="btnSignOutNow" ${signedIn?"":"disabled"}>Sign out</button>
+        <button class="btn danger" id="btnSignOutNow" ${signedIn ? "" : "disabled"}>Sign out</button>
       </div>
       `,
-      [{label:"Close", kind:"ghost"}]
+      [{ label: "Close", kind: "ghost" }]
     );
 
-    $("#toggleAutoExport").addEventListener("change", async(e)=>{ await DB.setSetting("auto_export_finalize", e.target.checked); });
-    $("#toggleAutoSync").addEventListener("change", async(e)=>{ await DB.setSetting("auto_sync_finalize", e.target.checked); });
+    $("#toggleAutoExport").addEventListener("change", async (e) => { await DB.setSetting("auto_export_finalize", e.target.checked); });
+    $("#toggleAutoSync").addEventListener("change", async (e) => { await DB.setSetting("auto_sync_finalize", e.target.checked); });
 
-    $("#btnSyncNow").addEventListener("click", async()=>{
+    $("#btnSyncNow").addEventListener("click", async () => {
       hideModal();
       $("#btnSync").click();
     });
 
-    $("#btnBackupSeason").addEventListener("click", async()=>{
-      try{
+    $("#btnBackupSeason").addEventListener("click", async () => {
+      try {
         const season = state.season || await DB.ensureDefaultSeason();
         const players = await DB.listPlayers(false);
         const games = await DB.listGamesForSeason(season.season_id, null);
         const events = [];
-        for (const g of games){
+        for (const g of games) {
           const evs = await DB.listEventsForGame(g.game_id);
           for (const e of evs) events.push(e);
         }
         const payload = { exported_at: new Date().toISOString(), season, players, games, events };
-        const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
-        const a=document.createElement("a");
-        a.href=URL.createObjectURL(blob);
-        a.download=`driveway_backup_${season.name.replace(/\s+/g,"_")}.json`;
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `driveway_backup_${season.name.replace(/\s+/g, "_")}.json`;
         document.body.appendChild(a); a.click(); a.remove();
-      } catch(e){
-        showModal("Backup error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+      } catch (e) {
+        showModal("Backup error", (e && e.message) ? e.message : String(e), [{ label: "OK", kind: "ghost" }]);
       }
     });
 
-    $("#btnSignOutNow").addEventListener("click", async()=>{
-      try{
+    $("#btnSignOutNow").addEventListener("click", async () => {
+      try {
         await sbSignOut();
         await DB.setSetting("last_sync_at", null);
         hideModal();
         setRoute("home");
-        render();
-      } catch(e){
-        showModal("Sign out error", (e && e.message) ? e.message : String(e), [{label:"OK", kind:"ghost"}]);
+        await render();
+      } catch (e) {
+        showModal("Sign out error", (e && e.message) ? e.message : String(e), [{ label: "OK", kind: "ghost" }]);
       }
     });
   });
@@ -266,20 +273,20 @@ async function init(){
   await updateHeaderSeason();
 
   // If Supabase configured + logged in, sync down once on startup (so laptop/iPad match)
-  try{
+  try {
     const health = await sbHealth();
     if (health.configured && health.signed_in) {
       await sbSyncUp();
       await sbSyncDown();
       await updateHeaderSeason();
     }
-  } catch {}
+  } catch { }
 
   setRoute("home");
 }
-init();
+safe(init);
 
-async function cloudBar(){
+async function cloudBar() {
   const h = await sbHealth();
   const last = await DB.getSetting("last_sync_at", null);
   const lastTxt = last ? new Date(last).toLocaleString() : "—";
@@ -290,105 +297,109 @@ async function cloudBar(){
   let dotClass = "dot";
   let text = "Local only";
   if (h.configured && h.signed_in) {
-    dotClass = (h.pending_ops===0) ? "dot ok" : "dot warn";
-    text = (h.pending_ops===0) ? `Cloud ✓ (${h.email})` : `Cloud pending (${h.pending_ops})`;
+    dotClass = (h.pending_ops === 0) ? "dot ok" : "dot warn";
+    text = (h.pending_ops === 0) ? `Cloud ✓ (${h.email})` : `Cloud pending (${h.pending_ops})`;
     text += ` • Last sync: ${lastTxt}`;
   } else if (h.configured && !h.signed_in) {
     dotClass = "dot warn";
     text = "Cloud (not signed in)";
   }
 
-  const bar=el("div",{class:"cloud-bar"});
-  bar.appendChild(el("div",{class:dotClass}));
-  bar.appendChild(el("div",{class:"p", html:text}));
+  const bar = el("div", { class: "cloud-bar" });
+  bar.appendChild(el("div", { class: dotClass }));
+  bar.appendChild(el("div", { class: "p", html: text }));
   return bar;
 }
 
-async function render(){
-  const app=$("#app"); app.innerHTML="";
+async function render() {
+  const app = $("#app"); app.innerHTML = "";
 
   if (state.route === "login") return renderLogin(app);
 
   app.appendChild(await cloudBar());
 
-  if(state.route==="home") return renderHome(app);
-  if(state.route==="players") return renderPlayers(app);
-  if(state.route==="start") return renderStart(app);
-  if(state.route==="live") return renderLive(app);
-  if(state.route==="recap") return renderRecap(app);
-  if(state.route==="dashboard") return renderDashboard(app);
-  if(state.route==="leaderboard") return renderLeaderboard(app);
-  if(state.route==="awards") return renderAwards(app);
-  if(state.route==="records") return renderRecords(app);
-  if(state.route==="draft") return renderDraft(app);
+  if (state.route === "home") return renderHome(app);
+  if (state.route === "players") return renderPlayers(app);
+  if (state.route === "start") return renderStart(app);
+  if (state.route === "live") return renderLive(app);
+  if (state.route === "recap") return renderRecap(app);
+  if (state.route === "dashboard") return renderDashboard(app);
+  if (state.route === "leaderboard") return renderLeaderboard(app);
+  if (state.route === "awards") return renderAwards(app);
+  if (state.route === "records") return renderRecords(app);
+  if (state.route === "draft") return renderDraft(app);
 }
 
-function renderHome(app){
-  const c=el("div",{class:"card section"});
-  c.appendChild(el("div",{class:"h1", html:"Home"}));
-  c.appendChild(el("div",{class:"p", html:"2v2 driveway stat tracker. Saves locally and (optionally) backs up to Supabase cloud."}));
-  const row=el("div",{class:"row"});
-  row.appendChild(el("button",{class:"btn ok", html:"Start Game", onclick:()=>setRoute("start")}));
-  row.appendChild(el("button",{class:"btn ghost", html:"Players", onclick:()=>setRoute("players")}));
-  row.appendChild(el("button",{class:"btn ghost", html:"Dashboard", onclick:()=>setRoute("dashboard")}));
-  row.appendChild(el("button",{class:"btn ghost", html:"Export Season", onclick:async()=>{ await exportSeason(state.season);} }));
+function renderHome(app) {
+  const c = el("div", { class: "card section" });
+  c.appendChild(el("div", { class: "h1", html: "Home" }));
+  c.appendChild(el("div", { class: "p", html: "2v2 driveway stat tracker. Saves locally and (optionally) backs up to Supabase cloud." }));
+  const row = el("div", { class: "row" });
+  row.appendChild(el("button", { class: "btn ok", html: "Start Game", onclick: () => setRoute("start") }));
+  row.appendChild(el("button", { class: "btn ghost", html: "Players", onclick: () => setRoute("players") }));
+  row.appendChild(el("button", { class: "btn ghost", html: "Dashboard", onclick: () => setRoute("dashboard") }));
+  row.appendChild(el("button", { class: "btn ghost", html: "Export Season", onclick: async () => { await exportSeason(state.season); } }));
   c.appendChild(row);
-  c.appendChild(el("div",{class:"hr"}));
-  c.appendChild(el("div",{class:"badge", html:"Target 40 • Win by 3 • 2s/3s only"}));
+  c.appendChild(el("div", { class: "hr" }));
+  c.appendChild(el("div", { class: "badge", html: "Target 40 • Win by 3 • 2s/3s only" }));
   app.appendChild(c);
 
-  const tips=el("div",{class:"card section", style:"margin-top:12px;"});
-  tips.appendChild(el("div",{class:"h2", html:"Backups"}));
-  tips.appendChild(el("div",{class:"p", html:"Cloud: tap <b>Sync</b> anytime (top right). For safety, export occasionally too."}));
-  tips.appendChild(el("div",{class:"p", html:"On iPad Safari: Share → Add to Home Screen."}));
+  const tips = el("div", { class: "card section", style: "margin-top:12px;" });
+  tips.appendChild(el("div", { class: "h2", html: "Backups" }));
+  tips.appendChild(el("div", { class: "p", html: "Cloud: tap <b>Sync</b> anytime (top right). For safety, export occasionally too." }));
+  tips.appendChild(el("div", { class: "p", html: "On iPad Safari: Share → Add to Home Screen." }));
   app.appendChild(tips);
 }
 
-async function renderLogin(app){
-  const c=el("div",{class:"card section"});
-  c.appendChild(el("div",{class:"h1", html:"Cloud Sign In"}));
+async function renderLogin(app) {
+  const c = el("div", { class: "card section" });
+  c.appendChild(el("div", { class: "h1", html: "Cloud Sign In" }));
 
   const ready = supabaseReady();
   if (!ready) {
-    c.appendChild(el("div",{class:"p", html:"Cloud not configured yet. Open <b>config.js</b> and paste your Supabase URL + anon key."}));
-    c.appendChild(el("button",{class:"btn ghost", html:"Back", onclick:()=>setRoute("home")}));
+    c.appendChild(el("div", { class: "p", html: "Cloud not configured yet. Open <b>config.js</b> and paste your Supabase URL + anon key." }));
+    c.appendChild(el("button", { class: "btn ghost", html: "Back", onclick: () => setRoute("home") }));
     app.appendChild(c);
     return;
   }
 
-  const email = el("input",{class:"input", placeholder:"Email", type:"email"});
-  const pass = el("input",{class:"input", placeholder:"Password", type:"password", style:"margin-top:10px;"});
+  const email = el("input", { class: "input", placeholder: "Email", type: "email" });
+  const pass = el("input", { class: "input", placeholder: "Password", type: "password", style: "margin-top:10px;" });
 
-  const btnRow = el("div",{class:"row", style:"margin-top:12px;"});
-  btnRow.appendChild(el("button",{class:"btn ok", html:"Sign In", onclick:async()=>{
-    try{
-      await sbSignIn(email.value.trim(), pass.value);
-      showModal("Signed in", "Now syncing down your cloud data…", []);
-      await sbSyncUp();
-      await sbSyncDown();
-      hideModal();
-      await updateHeaderSeason();
-      setRoute("home");
-    } catch(e){
-      hideModal();
-      showModal("Sign in error", (e&&e.message)?e.message:String(e), [{label:"OK", kind:"ghost"}]);
+  const btnRow = el("div", { class: "row", style: "margin-top:12px;" });
+  btnRow.appendChild(el("button", {
+    class: "btn ok", html: "Sign In", onclick: async () => {
+      try {
+        await sbSignIn(email.value.trim(), pass.value);
+        showModal("Signed in", "Now syncing down your cloud data…", []);
+        await sbSyncUp();
+        await sbSyncDown();
+        hideModal();
+        await updateHeaderSeason();
+        setRoute("home");
+      } catch (e) {
+        hideModal();
+        showModal("Sign in error", (e && e.message) ? e.message : String(e), [{ label: "OK", kind: "ghost" }]);
+      }
     }
-  }}));
-  btnRow.appendChild(el("button",{class:"btn ghost", html:"Create Account", onclick:async()=>{
-    try{
-      await sbSignUp(email.value.trim(), pass.value);
-      showModal("Account created", "If Supabase requires email confirmation, confirm then sign in. Otherwise syncing now…", []);
-      await sbSyncUp();
-      await sbSyncDown();
-      hideModal();
-      await updateHeaderSeason();
-      setRoute("home");
-    } catch(e){
-      hideModal();
-      showModal("Sign up error", (e&&e.message)?e.message:String(e), [{label:"OK", kind:"ghost"}]);
+  }));
+  btnRow.appendChild(el("button", {
+    class: "btn ghost", html: "Create Account", onclick: async () => {
+      try {
+        await sbSignUp(email.value.trim(), pass.value);
+        showModal("Account created", "If Supabase requires email confirmation, confirm then sign in. Otherwise syncing now…", []);
+        await sbSyncUp();
+        await sbSyncDown();
+        hideModal();
+        await updateHeaderSeason();
+        setRoute("home");
+      } catch (e) {
+        hideModal();
+        showModal("Sign up error", (e && e.message) ? e.message : String(e), [{ label: "OK", kind: "ghost" }]);
+      }
     }
-  }}));
-  btnRow.appendChild(el("button",{class:"btn ghost", html:"Back", onclick:()=>setRoute("home")}));
+  }));
+  btnRow.appendChild(el("button", { class: "btn ghost", html: "Back", onclick: () => setRoute("home") }));
 
   c.appendChild(email);
   c.appendChild(pass);
@@ -397,39 +408,49 @@ async function renderLogin(app){
   app.appendChild(c);
 }
 
-async function renderPlayers(app){
+async function renderPlayers(app) {
   await refreshPlayers();
-  const c=el("div",{class:"card section"});
-  c.appendChild(el("div",{class:"h1", html:"Players"}));
-  c.appendChild(el("div",{class:"p", html:"Add players once. If cloud is enabled, they sync across devices."}));
+  const c = el("div", { class: "card section" });
+  c.appendChild(el("div", { class: "h1", html: "Players" }));
+  c.appendChild(el("div", { class: "p", html: "Add players once. If cloud is enabled, they sync across devices." }));
 
-  const input=el("input",{class:"input", placeholder:"Add player name…"});
-  const add=el("button",{class:"btn ok", html:"Add", onclick:async()=>{
-    const name=input.value.trim();
-    if(!name) return;
-    const p = await DB.addPlayer(name);
-    // queue cloud upsert
-    await DB.enqueueOp("upsert_player", p);
-    input.value="";
-    render();
-  }});
-  c.appendChild(el("div",{class:"row"},[input, add]));
+  const input = el("input", { class: "input", placeholder: "Add player name…" });
+  const add = el("button", {
+    class: "btn ok", html: "Add", onclick: async () => {
+      const name = input.value.trim();
+      if (!name) return;
 
-  const tbl=el("table",{class:"table", style:"margin-top:12px;"});
-  tbl.appendChild(el("thead",{html:"<tr><th>Name</th><th style='width:140px;'>Status</th></tr>"}));
-  const tb=el("tbody",{});
-  for(const p of state.players){
-    const tr=el("tr",{});
-    tr.style.cursor="pointer";
-    tr.onclick=()=>showPlayerModal(p.player_id);
-    tr.appendChild(el("td",{html:`<b>${p.name}</b><div class="kbd">${p.player_id.slice(0,8)}</div>`}));
-    const td=el("td",{});
-    td.appendChild(el("button",{class:"btn small ghost", html:"Archive", onclick:async(e)=>{ e.stopPropagation();
-      p.active=false;
-      await DB.updatePlayer(p);
+      const p = await DB.addPlayer(name);
+
+      // queue cloud upsert
       await DB.enqueueOp("upsert_player", p);
-      render();
-    }}));
+      if (typeof scheduleAutoSync === "function") scheduleAutoSync();
+
+      input.value = "";
+      safe(render);
+    }
+  });
+  c.appendChild(el("div", { class: "row" }, [input, add]));
+
+  const tbl = el("table", { class: "table", style: "margin-top:12px;" });
+  tbl.appendChild(el("thead", { html: "<tr><th>Name</th><th style='width:140px;'>Status</th></tr>" }));
+  const tb = el("tbody", {});
+  for (const p of state.players) {
+    const tr = el("tr", {});
+    tr.style.cursor = "pointer";
+    tr.onclick = () => showPlayerModal(p.player_id);
+    tr.appendChild(el("td", { html: `<b>${p.name}</b><div class="kbd">${p.player_id.slice(0, 8)}</div>` }));
+    const td = el("td", {});
+    td.appendChild(el("button", {
+      class: "btn small ghost", html: "Archive", onclick: async (e) => {
+        e.stopPropagation();
+        p.active = false;
+        await DB.updatePlayer(p);
+        await DB.enqueueOp("upsert_player", p);
+        if (typeof scheduleAutoSync === "function") scheduleAutoSync();
+        safe(render);
+      }
+    }));
     tr.appendChild(td);
     tb.appendChild(tr);
   }
@@ -438,105 +459,105 @@ async function renderPlayers(app){
   app.appendChild(c);
 }
 
-async function renderStart(app){
+async function renderStart(app) {
   await refreshPlayers();
-  const c=el("div",{class:"card section"});
-  c.appendChild(el("div",{class:"h1", html:"Start Game"}));
+  const c = el("div", { class: "card section" });
+  c.appendChild(el("div", { class: "h1", html: "Start Game" }));
 
-  if(state.players.length<4){
-    c.appendChild(el("div",{class:"p", html:"Add at least 4 players first."}));
-    c.appendChild(el("button",{class:"btn ok", html:"Go to Players", onclick:()=>setRoute("players")}));
+  if (state.players.length < 4) {
+    c.appendChild(el("div", { class: "p", html: "Add at least 4 players first." }));
+    c.appendChild(el("button", { class: "btn ok", html: "Go to Players", onclick: () => setRoute("players") }));
     app.appendChild(c); return;
   }
 
-  if(!state._start) state._start={selected:[], A:[null,null], B:[null,null]};
-  const s=state._start;
+  if (!state._start) state._start = { selected: [], A: [null, null], B: [null, null] };
+  const s = state._start;
 
-  const sel=el("select",{class:"input", style:"max-width:420px;"});
-  sel.appendChild(el("option",{value:"", html:"Select player…"}));
-  for(const p of state.players){
-    if(s.selected.includes(p.player_id)) continue;
-    sel.appendChild(el("option",{value:p.player_id, html:p.name}));
+  const sel = el("select", { class: "input", style: "max-width:420px;" });
+  sel.appendChild(el("option", { value: "", html: "Select player…" }));
+  for (const p of state.players) {
+    if (s.selected.includes(p.player_id)) continue;
+    sel.appendChild(el("option", { value: p.player_id, html: p.name }));
   }
-  const addBtn=el("button",{class:"btn ok", html:"Add to 4", onclick:()=>{
-    const id=sel.value; if(!id) return;
-    s.selected.push(id);
-    const slots=[...s.A,...s.B];
-    const idx=slots.findIndex(x=>!x);
-    if(idx!==-1){ if(idx<2) s.A[idx]=id; else s.B[idx-2]=id; }
-    render();
-  }});
-  c.appendChild(el("div",{class:"row"},[sel, addBtn]));
+  const addBtn = el("button", {
+    class: "btn ok", html: "Add to 4", onclick: () => {
+      const id = sel.value; if (!id) return;
+      s.selected.push(id);
+      const slots = [...s.A, ...s.B];
+      const idx = slots.findIndex(x => !x);
+      if (idx !== -1) { if (idx < 2) s.A[idx] = id; else s.B[idx - 2] = id; }
+      safe(render);
+    }
+  });
+  c.appendChild(el("div", { class: "row" }, [sel, addBtn]));
 
-  const chips=el("div",{class:"row", style:"margin-top:10px;"});
-  for(const id of s.selected){
-    const nm=state.players.find(p=>p.player_id===id)?.name||id;
-    const chip=el("span",{class:"badge", html:`${nm} <span style="opacity:.7">✕</span>`});
-    chip.style.cursor="pointer";
-    chip.onclick=()=>{
-      s.selected=s.selected.filter(x=>x!==id);
-      s.A=s.A.map(x=>x===id?null:x);
-      s.B=s.B.map(x=>x===id?null:x);
-      render();
+  const chips = el("div", { class: "row", style: "margin-top:10px;" });
+  for (const id of s.selected) {
+    const nm = state.players.find(p => p.player_id === id)?.name || id;
+    const chip = el("span", { class: "badge", html: `${nm} <span style="opacity:.7">✕</span>` });
+    chip.style.cursor = "pointer";
+    chip.onclick = () => {
+      s.selected = s.selected.filter(x => x !== id);
+      s.A = s.A.map(x => x === id ? null : x);
+      s.B = s.B.map(x => x === id ? null : x);
+      safe(render);
     };
     chips.appendChild(chip);
   }
   c.appendChild(chips);
 
-  const makeSide=(label, arr)=>{
-    const box=el("div",{class:"card section", style:"background: rgba(255,255,255,.02);"});
-    box.appendChild(el("div",{class:"h2", html:label}));
-    for(let i=0;i<2;i++){
-      const dd=el("select",{class:"input", style:"margin-top:10px;"});
-      dd.appendChild(el("option",{value:"", html:`Slot ${i+1}`}));
-      for(const id of s.selected){
-        const nm=state.players.find(p=>p.player_id===id)?.name||id;
-        dd.appendChild(el("option",{value:id, html:nm}));
+  const makeSide = (label, arr) => {
+    const box = el("div", { class: "card section", style: "background: rgba(255,255,255,.02);" });
+    box.appendChild(el("div", { class: "h2", html: label }));
+    for (let i = 0; i < 2; i++) {
+      const dd = el("select", { class: "input", style: "margin-top:10px;" });
+      dd.appendChild(el("option", { value: "", html: `Slot ${i + 1}` }));
+      for (const id of s.selected) {
+        const nm = state.players.find(p => p.player_id === id)?.name || id;
+        dd.appendChild(el("option", { value: id, html: nm }));
       }
-      dd.value=arr[i]||"";
-      dd.onchange=()=>{
-        const id=dd.value||null;
-        const used=new Set([...(s.A.filter(Boolean)), ...(s.B.filter(Boolean))]);
-        if(id && used.has(id) && arr[i]!==id){ dd.value=arr[i]||""; return; }
-        arr[i]=id;
+      dd.value = arr[i] || "";
+      dd.onchange = () => {
+        const id = dd.value || null;
+        const used = new Set([...(s.A.filter(Boolean)), ...(s.B.filter(Boolean))]);
+        if (id && used.has(id) && arr[i] !== id) { dd.value = arr[i] || ""; return; }
+        arr[i] = id;
       };
       box.appendChild(dd);
     }
     return box;
   };
-  const pair=el("div",{class:"grid2", style:"margin-top:12px;"});
+  const pair = el("div", { class: "grid2", style: "margin-top:12px;" });
   pair.appendChild(makeSide("Side A", s.A));
   pair.appendChild(makeSide("Side B", s.B));
   c.appendChild(pair);
 
-  const swaps=el("div",{class:"row", style:"margin-top:12px;"});
-  const swap=(label, fn)=>el("button",{class:"btn ghost", html:label, onclick:()=>{ fn(); render(); }});
-  swaps.appendChild(swap("Swap A2 ↔ B1", ()=>{ const t=s.A[1]; s.A[1]=s.B[0]; s.B[0]=t; }));
-  swaps.appendChild(swap("Swap A1 ↔ B1", ()=>{ const t=s.A[0]; s.A[0]=s.B[0]; s.B[0]=t; }));
-  swaps.appendChild(swap("Swap Sides", ()=>{ const t=s.A; s.A=s.B; s.B=t; }));
-  swaps.appendChild(swap("Reset", ()=>{ state._start={selected:[], A:[null,null], B:[null,null]}; }));
+  const swaps = el("div", { class: "row", style: "margin-top:12px;" });
+  const swap = (label, fn) => el("button", { class: "btn ghost", html: label, onclick: () => { fn(); safe(render); } });
+  swaps.appendChild(swap("Swap A2 ↔ B1", () => { const t = s.A[1]; s.A[1] = s.B[0]; s.B[0] = t; }));
+  swaps.appendChild(swap("Swap A1 ↔ B1", () => { const t = s.A[0]; s.A[0] = s.B[0]; s.B[0] = t; }));
+  swaps.appendChild(swap("Swap Sides", () => { const t = s.A; s.A = s.B; s.B = t; }));
+  swaps.appendChild(swap("Reset", () => { state._start = { selected: [], A: [null, null], B: [null, null] }; }));
   c.appendChild(swaps);
 
-  const ready=(s.A.every(Boolean) && s.B.every(Boolean) && new Set([...s.A,...s.B]).size===4);
-  c.appendChild(el("div",{class:"hr"}));
-  c.appendChild(el("button",{
-    class:`btn ${ready?"ok":"ghost"}`,
-    html:"Start",
-    onclick: async()=>{
-      if(!ready) return;
+  const ready = (s.A.every(Boolean) && s.B.every(Boolean) && new Set([...s.A, ...s.B]).size === 4);
+  c.appendChild(el("div", { class: "hr" }));
+  c.appendChild(el("button", {
+    class: `btn ${ready ? "ok" : "ghost"}`,
+    html: "Start",
+    onclick: async () => {
+      if (!ready) return;
 
       const game = await DB.addGame(state.season.season_id, s.A, s.B);
 
-      // (Optional) keep this if you still want games saved to cloud later.
-      // Not required for overlay anymore.
+      // queue cloud upsert (optional but good)
       await DB.enqueueOp("upsert_game", game);
 
-      // NEW: tell overlay exactly what to display (game + rosters)
-      await DB.enqueueOp("set_stream_state", {
-        game_id: game.game_id,
-        sideA_player_ids: s.A,
-        sideB_player_ids: s.B
-      });
+      // stream overlay: set active game id
+      await DB.enqueueOp("set_stream_state", { game_id: game.game_id });
+
+      // 🔥 AUTO-SYNC after enqueuing ops
+      if (typeof scheduleAutoSync === "function") scheduleAutoSync();
 
       state.currentGame = game;
       state._start = null;
@@ -546,213 +567,258 @@ async function renderStart(app){
   app.appendChild(c);
 }
 
-async function renderLive(app){
-  const game=state.currentGame;
-  if(!game){
-    const c=el("div",{class:"card section"});
-    c.appendChild(el("div",{class:"h1", html:"No game in progress"}));
-    c.appendChild(el("button",{class:"btn ok", html:"Start Game", onclick:()=>setRoute("start")}));
+async function renderLive(app) {
+  const game = state.currentGame;
+  if (!game) {
+    const c = el("div", { class: "card section" });
+    c.appendChild(el("div", { class: "h1", html: "No game in progress" }));
+    c.appendChild(el("button", { class: "btn ok", html: "Start Game", onclick: () => setRoute("start") }));
     app.appendChild(c); return;
   }
 
-  const playersAll=await DB.listPlayers(false);
-  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
-  const name=(id)=>playersById.get(id)?.name||"—";
+  const playersAll = await DB.listPlayers(false);
+  const playersById = new Map(playersAll.map(p => [p.player_id, p]));
+  const name = (id) => playersById.get(id)?.name || "—";
 
-  const evs=await DB.listEventsForGame(game.game_id);
-  const box=computeFromEvents(game, evs);
+  const evs = await DB.listEventsForGame(game.game_id);
+  const box = computeFromEvents(game, evs);
 
-  const scoreCard=el("div",{class:"card scorebar"});
-  const scoreline=el("div",{class:"scoreline"});
-  scoreline.appendChild(el("div",{class:"score", html:`${box.scoreA}`}));
-  scoreline.appendChild(el("div",{class:"score", style:"opacity:.5", html:"—"}));
-  scoreline.appendChild(el("div",{class:"score", html:`${box.scoreB}`}));
+  const scoreCard = el("div", { class: "card scorebar" });
+  const scoreline = el("div", { class: "scoreline" });
+  scoreline.appendChild(el("div", { class: "score", html: `${box.scoreA}` }));
+  scoreline.appendChild(el("div", { class: "score", style: "opacity:.5", html: "—" }));
+  scoreline.appendChild(el("div", { class: "score", html: `${box.scoreB}` }));
   scoreCard.appendChild(scoreline);
 
-  const to40A=Math.max(0, 40-box.scoreA);
-  const to40B=Math.max(0, 40-box.scoreB);
+  const to40A = Math.max(0, 40 - box.scoreA);
+  const to40B = Math.max(0, 40 - box.scoreB);
 
-  const rule=el("div",{class:"ruleline"});
-  rule.appendChild(el("div",{html:"Target 40 • Win by 3"}));
-  rule.appendChild(el("div",{html:`Lead: ${box.lead} (need 3)`}));
-  rule.appendChild(el("div",{html:`To 40: A needs ${to40A} • B needs ${to40B}`}));
+  const rule = el("div", { class: "ruleline" });
+  rule.appendChild(el("div", { html: "Target 40 • Win by 3" }));
+  rule.appendChild(el("div", { html: `Lead: ${box.lead} (need 3)` }));
+  rule.appendChild(el("div", { html: `To 40: A needs ${to40A} • B needs ${to40B}` }));
   scoreCard.appendChild(rule);
 
-  if(box.canFinalize){
-    scoreCard.appendChild(el("div",{class:"badge", style:"margin-top:10px; color:#d1fae5; border-color: rgba(34,197,94,.35); background: rgba(34,197,94,.10);", html:"Game can be finalized"}));
+  if (box.canFinalize) {
+    scoreCard.appendChild(el("div", {
+      class: "badge",
+      style: "margin-top:10px; color:#d1fae5; border-color: rgba(34,197,94,.35); background: rgba(34,197,94,.10);",
+      html: "Game can be finalized"
+    }));
   }
 
   // Recent events (last 3)
-  const statLabel=(s)=>{
-    const map={
-      "2PM":"2PT MAKE","2PMISS":"2PT MISS",
-      "3PM":"3PT MAKE","3PMISS":"3PT MISS",
-      "AST":"AST","OREB":"OREB","DREB":"DREB","STL":"STL","BLK":"BLK"
+  const statLabel = (s) => {
+    const map = {
+      "2PM": "2PT MAKE", "2PMISS": "2PT MISS",
+      "3PM": "3PT MAKE", "3PMISS": "3PT MISS",
+      "AST": "AST", "OREB": "OREB", "DREB": "DREB", "STL": "STL", "BLK": "BLK"
     };
-    return map[s]||s;
+    return map[s] || s;
   };
+
   const recent = evs.slice(-3).reverse();
-  const recentWrap = el("div",{style:"margin-top:10px;"});
-  recentWrap.appendChild(el("div",{class:"small-note", html:"Last actions"}));
-  if(!recent.length){
-    recentWrap.appendChild(el("div",{class:"mini", style:"opacity:.75", html:"—"}));
+  const recentWrap = el("div", { style: "margin-top:10px;" });
+  recentWrap.appendChild(el("div", { class: "small-note", html: "Last actions" }));
+  if (!recent.length) {
+    recentWrap.appendChild(el("div", { class: "mini", style: "opacity:.75", html: "—" }));
   } else {
-    for(const e of recent){
-      const when = (e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "");
-      recentWrap.appendChild(el("div",{class:"mini", style:"padding:0; margin-top:4px;", html:`${when ? "<span style=\"opacity:.6\">"+when+"</span> " : ""}<b>${name(e.player_id)}</b> • ${statLabel(e.stat_type)}`}));
+    for (const e of recent) {
+      const when = (e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+      recentWrap.appendChild(el("div", {
+        class: "mini",
+        style: "padding:0; margin-top:4px;",
+        html: `${when ? "<span style=\"opacity:.6\">" + when + "</span> " : ""}<b>${name(e.player_id)}</b> • ${statLabel(e.stat_type)}`
+      }));
     }
   }
   scoreCard.appendChild(recentWrap);
 
   app.appendChild(scoreCard);
 
-  const grid=el("div",{class:"grid4"});
-  const sideMap=new Map();
-  for(const pid of game.sideA_player_ids) sideMap.set(pid,"A");
-  for(const pid of game.sideB_player_ids) sideMap.set(pid,"B");
+  const grid = el("div", { class: "grid4" });
+  const sideMap = new Map();
+  for (const pid of game.sideA_player_ids) sideMap.set(pid, "A");
+  for (const pid of game.sideB_player_ids) sideMap.set(pid, "B");
 
-  const addEvent=async(pid, stat)=>{
+  const addEvent = async (pid, stat) => {
     const ev = await DB.addEvent(game.game_id, pid, stat);
     await DB.enqueueOp("upsert_event", ev);
-    render();
+    if (typeof scheduleAutoSync === "function") scheduleAutoSync();
+    safe(render);
   };
 
-  const cardFor=(pid)=>{
-    const line=box.lines.get(pid);
-    const d=box.derived(pid);
+  const cardFor = (pid) => {
+    const line = box.lines.get(pid);
+    const d = box.derived(pid);
 
-    const card=el("div",{class:"card player-card"});
-    const header=el("div",{class:"player-name"});
-    header.appendChild(el("div",{html:name(pid)}));
-    header.appendChild(el("div",{class:"side-tag", html:`Side ${sideMap.get(pid)}`}));
+    const card = el("div", { class: "card player-card" });
+    const header = el("div", { class: "player-name" });
+    header.appendChild(el("div", { html: name(pid) }));
+    header.appendChild(el("div", { class: "side-tag", html: `Side ${sideMap.get(pid)}` }));
     card.appendChild(header);
 
-    const shoot=el("div",{class:"btn-grid-2x2"});
-    shoot.appendChild(el("button",{class:"stat-btn primary", html:"2PT MAKE", onclick:()=>addEvent(pid,"2PM")}));
-    shoot.appendChild(el("button",{class:"stat-btn miss", html:"2PT MISS", onclick:()=>addEvent(pid,"2PMISS")}));
-    shoot.appendChild(el("button",{class:"stat-btn primary", html:"3PT MAKE", onclick:()=>addEvent(pid,"3PM")}));
-    shoot.appendChild(el("button",{class:"stat-btn miss", html:"3PT MISS", onclick:()=>addEvent(pid,"3PMISS")}));
+    const shoot = el("div", { class: "btn-grid-2x2" });
+    shoot.appendChild(el("button", { class: "stat-btn primary", html: "2PT MAKE", onclick: () => addEvent(pid, "2PM") }));
+    shoot.appendChild(el("button", { class: "stat-btn miss", html: "2PT MISS", onclick: () => addEvent(pid, "2PMISS") }));
+    shoot.appendChild(el("button", { class: "stat-btn primary", html: "3PT MAKE", onclick: () => addEvent(pid, "3PM") }));
+    shoot.appendChild(el("button", { class: "stat-btn miss", html: "3PT MISS", onclick: () => addEvent(pid, "3PMISS") }));
     card.appendChild(shoot);
 
-    const row3=el("div",{class:"btn-row3"});
-    row3.appendChild(el("button",{class:"stat-btn mid", html:"AST", onclick:()=>addEvent(pid,"AST")}));
-    row3.appendChild(el("button",{class:"stat-btn mid", html:"OREB", onclick:()=>addEvent(pid,"OREB")}));
-    row3.appendChild(el("button",{class:"stat-btn mid", html:"DREB", onclick:()=>addEvent(pid,"DREB")}));
+    const row3 = el("div", { class: "btn-row3" });
+    row3.appendChild(el("button", { class: "stat-btn mid", html: "AST", onclick: () => addEvent(pid, "AST") }));
+    row3.appendChild(el("button", { class: "stat-btn mid", html: "OREB", onclick: () => addEvent(pid, "OREB") }));
+    row3.appendChild(el("button", { class: "stat-btn mid", html: "DREB", onclick: () => addEvent(pid, "DREB") }));
     card.appendChild(row3);
 
-    const row2=el("div",{class:"btn-row2"});
-    row2.appendChild(el("button",{class:"stat-btn mid", html:"STL", onclick:()=>addEvent(pid,"STL")}));
-    row2.appendChild(el("button",{class:"stat-btn mid", html:"BLK", onclick:()=>addEvent(pid,"BLK")}));
+    const row2 = el("div", { class: "btn-row2" });
+    row2.appendChild(el("button", { class: "stat-btn mid", html: "STL", onclick: () => addEvent(pid, "STL") }));
+    row2.appendChild(el("button", { class: "stat-btn mid", html: "BLK", onclick: () => addEvent(pid, "BLK") }));
     card.appendChild(row2);
 
-    const mini=`PTS ${d.pts} | 2s ${line["2PM"]}-${d.twoA} | 3s ${line["3PM"]}-${d.threeA} | REB ${d.reb} (O${line["OREB"]}/D${line["DREB"]}) | AST ${line["AST"]} | STL ${line["STL"]} | BLK ${line["BLK"]}`;
-    card.appendChild(el("div",{class:"mini", html:mini}));
+    const mini = `PTS ${d.pts} | 2s ${line["2PM"]}-${d.twoA} | 3s ${line["3PM"]}-${d.threeA} | REB ${d.reb} (O${line["OREB"]}/D${line["DREB"]}) | AST ${line["AST"]} | STL ${line["STL"]} | BLK ${line["BLK"]}`;
+    card.appendChild(el("div", { class: "mini", html: mini }));
     return card;
   };
 
-  for(const pid of [...game.sideA_player_ids, ...game.sideB_player_ids]) grid.appendChild(cardFor(pid));
+  for (const pid of [...game.sideA_player_ids, ...game.sideB_player_ids]) grid.appendChild(cardFor(pid));
   app.appendChild(grid);
 
-  const actions=el("div",{class:"card section", style:"margin-top:12px;"});
-  const act=el("div",{class:"bottom-actions"});
-  act.appendChild(el("button",{class:"btn ghost", html:"Undo", onclick:async()=>{
-    if(!evs.length) return;
-    const last=evs[evs.length-1];
-    await DB.deleteEvent(last.event_id);
-    await DB.enqueueOp("delete_event", { event_id: last.event_id });
-    render();
-  }}));
-  act.appendChild(el("button",{class:"btn ok", html:"End Game", onclick:async()=>{
-    if(!box.canFinalize){
-      showModal("End game early?",
-        "Game has not met win condition (Target 40, win by 3). End anyway?",
-        [{label:"Cancel", kind:"ghost"},{label:"End Anyway", kind:"danger", onClick:()=>setRoute("recap")}]
-      );
-    } else {
-      setRoute("recap");
+  const actions = el("div", { class: "card section", style: "margin-top:12px;" });
+  const act = el("div", { class: "bottom-actions" });
+  act.appendChild(el("button", {
+    class: "btn ghost", html: "Undo", onclick: async () => {
+      if (!evs.length) return;
+      const last = evs[evs.length - 1];
+      await DB.deleteEvent(last.event_id);
+      await DB.enqueueOp("delete_event", { event_id: last.event_id });
+      if (typeof scheduleAutoSync === "function") scheduleAutoSync();
+      safe(render);
     }
-  }}));
+  }));
+  act.appendChild(el("button", {
+    class: "btn ok", html: "End Game", onclick: async () => {
+      if (!box.canFinalize) {
+        showModal("End game early?",
+          "Game has not met win condition (Target 40, win by 3). End anyway?",
+          [{ label: "Cancel", kind: "ghost" }, { label: "End Anyway", kind: "danger", onClick: () => setRoute("recap") }]
+        );
+      } else {
+        setRoute("recap");
+      }
+    }
+  }));
   actions.appendChild(act);
   app.appendChild(actions);
 }
 
-async function renderRecap(app){
-  const game=state.currentGame;
-  if(!game){ setRoute("home"); return; }
+async function renderRecap(app) {
+  const game = state.currentGame;
+  if (!game) { setRoute("home"); return; }
 
-  const playersAll=await DB.listPlayers(false);
-  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
-  const name=(id)=>playersById.get(id)?.name||"—";
+  const playersAll = await DB.listPlayers(false);
+  const playersById = new Map(playersAll.map(p => [p.player_id, p]));
+  const name = (id) => playersById.get(id)?.name || "—";
 
-  const evs=await DB.listEventsForGame(game.game_id);
-  const box=computeFromEvents(game, evs);
+  const evs = await DB.listEventsForGame(game.game_id);
+  const box = computeFromEvents(game, evs);
 
-  const c=el("div",{class:"card section"});
-  c.appendChild(el("div",{class:"h1", html:"Game Recap"}));
-  c.appendChild(el("div",{class:"badge", html:`Final: ${box.scoreA} — ${box.scoreB} • Winner: Side ${box.winner_side}`}));
+  const c = el("div", { class: "card section" });
+  c.appendChild(el("div", { class: "h1", html: "Game Recap" }));
+  c.appendChild(el("div", { class: "badge", html: `Final: ${box.scoreA} — ${box.scoreB} • Winner: Side ${box.winner_side}` }));
 
-  const tbl=el("table",{class:"table", style:"margin-top:12px;"});
-  tbl.appendChild(el("thead",{html:"<tr><th>Player</th><th>Side</th><th>PTS</th><th>2s</th><th>3s</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th></tr>"}));
-  const tb=el("tbody",{});
-  const sideMap=new Map();
-  for(const pid of game.sideA_player_ids) sideMap.set(pid,"A");
-  for(const pid of game.sideB_player_ids) sideMap.set(pid,"B");
+  const tbl = el("table", { class: "table", style: "margin-top:12px;" });
+  tbl.appendChild(el("thead", { html: "<tr><th>Player</th><th>Side</th><th>PTS</th><th>2s</th><th>3s</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th></tr>" }));
+  const tb = el("tbody", {});
+  const sideMap = new Map();
+  for (const pid of game.sideA_player_ids) sideMap.set(pid, "A");
+  for (const pid of game.sideB_player_ids) sideMap.set(pid, "B");
 
-  for(const pid of [...game.sideA_player_ids, ...game.sideB_player_ids]){
-    const line=box.lines.get(pid);
-    const d=box.derived(pid);
-    const tr=el("tr",{});
-    tr.appendChild(el("td",{html:`<b>${name(pid)}</b>`}));
-    tr.appendChild(el("td",{html:sideMap.get(pid)}));
-    tr.appendChild(el("td",{html:d.pts}));
-    tr.appendChild(el("td",{html:`${line["2PM"]}-${d.twoA}`}));
-    tr.appendChild(el("td",{html:`${line["3PM"]}-${d.threeA}`}));
-    tr.appendChild(el("td",{html:d.reb}));
-    tr.appendChild(el("td",{html:line["AST"]}));
-    tr.appendChild(el("td",{html:line["STL"]}));
-    tr.appendChild(el("td",{html:line["BLK"]}));
+  for (const pid of [...game.sideA_player_ids, ...game.sideB_player_ids]) {
+    const line = box.lines.get(pid);
+    const d = box.derived(pid);
+    const tr = el("tr", {});
+    tr.appendChild(el("td", { html: `<b>${name(pid)}</b>` }));
+    tr.appendChild(el("td", { html: sideMap.get(pid) }));
+    tr.appendChild(el("td", { html: d.pts }));
+    tr.appendChild(el("td", { html: `${line["2PM"]}-${d.twoA}` }));
+    tr.appendChild(el("td", { html: `${line["3PM"]}-${d.threeA}` }));
+    tr.appendChild(el("td", { html: d.reb }));
+    tr.appendChild(el("td", { html: line["AST"] }));
+    tr.appendChild(el("td", { html: line["STL"] }));
+    tr.appendChild(el("td", { html: line["BLK"] }));
     tb.appendChild(tr);
   }
   tbl.appendChild(tb);
   c.appendChild(tbl);
 
-  c.appendChild(el("div",{class:"hr"}));
-  const row=el("div",{class:"row"});
-  row.appendChild(el("button",{class:"btn ok", html:"Finalize Game", onclick:async()=>{
-    game.finalized=true;
-    game.final_score_a=box.scoreA;
-    game.final_score_b=box.scoreB;
-    game.winner_side=box.winner_side;
-    await DB.putGame(game);
+  c.appendChild(el("div", { class: "hr" }));
+  const row = el("div", { class: "row" });
 
-    // queue a bulk finalize upsert (game + its events) for reliability
-    await DB.enqueueOp("upsert_bulk_finalize", { game, events: evs });
+  row.appendChild(el("button", {
+    class: "btn ok", html: "Finalize Game", onclick: async () => {
+      game.finalized = true;
+      game.final_score_a = box.scoreA;
+      game.final_score_b = box.scoreB;
+      game.winner_side = box.winner_side;
+      await DB.putGame(game);
 
-    // NEW: clear overlay after finalize so it goes blank until next game starts
-    await DB.enqueueOp("clear_stream_state", {});
+      // reliable bulk finalize
+      await DB.enqueueOp("upsert_bulk_finalize", { game, events: evs });
 
-    const auto=await DB.getSetting("auto_export_finalize", false);
-    if(auto){
-      await exportGame(game, state.season, playersById);
-      await exportSeason(state.season);
+      // clear overlay after finalize
+      await DB.enqueueOp("clear_stream_state", {});
+
+      // if enabled: auto-sync after finalize (plus our immediate trigger)
+      const autoSync = await DB.getSetting("auto_sync_finalize", true);
+      if (autoSync && typeof scheduleAutoSync === "function") scheduleAutoSync(50);
+      else if (typeof scheduleAutoSync === "function") scheduleAutoSync(); // still safe
+
+      const auto = await DB.getSetting("auto_export_finalize", false);
+      if (auto) {
+        await exportGame(game, state.season, playersById);
+        await exportSeason(state.season);
+      }
+
+      state.currentGame = null;
+      setRoute("dashboard");
     }
-    state.currentGame=null;
-    setRoute("dashboard");
-  }}));
-  row.appendChild(el("button",{class:"btn ghost", html:"Export Game", onclick:async()=>{ await exportGame(game, state.season, playersById); }}));
-  row.appendChild(el("button",{class:"btn danger", html:"Discard Game", onclick:async()=>{
-    showModal("Discard this game?", "This deletes the game and all its events.",
-      [{label:"Cancel", kind:"ghost"},{label:"Discard", kind:"danger", onClick:async()=>{
-        await DB.deleteGame(game.game_id);
-        await DB.enqueueOp("delete_game", { game_id: game.game_id });
-        state.currentGame=null;
-        setRoute("home");
-      }}]
-    );
-  }}));
+  }));
+
+  row.appendChild(el("button", { class: "btn ghost", html: "Export Game", onclick: async () => { await exportGame(game, state.season, playersById); } }));
+
+  row.appendChild(el("button", {
+    class: "btn danger", html: "Discard Game", onclick: async () => {
+      showModal("Discard this game?", "This deletes the game and all its events.",
+        [{
+          label: "Cancel", kind: "ghost"
+        }, {
+          label: "Discard", kind: "danger", onClick: async () => {
+            await DB.deleteGame(game.game_id);
+            await DB.enqueueOp("delete_game", { game_id: game.game_id });
+            if (typeof scheduleAutoSync === "function") scheduleAutoSync();
+            state.currentGame = null;
+            setRoute("home");
+          }
+        }]
+      );
+    }
+  }));
+
   c.appendChild(row);
   app.appendChild(c);
 }
+
+/* =========================
+   EVERYTHING BELOW HERE
+   is unchanged from your paste.
+   (Dashboard / Leaderboard / Records / Awards / Draft / Player modal etc.)
+   Paste your existing remaining functions below this line as-is.
+   ========================= */
+
+// --- Dashboard / Leaderboard / Records / Awards / Draft + Player Career Highs ---
+// KEEP your existing code starting from renderDashboard(...) onward.
+// (If you want, paste the rest and I will re-output the *entire* file in one block.)
 
 async function renderDashboard(app){
   const gamesFinal = await DB.listGamesForSeason(state.season.season_id, true);
