@@ -178,9 +178,6 @@
 </head>
 <body>
   <div id="overlay">
-       <div id="debugBox" style="position:absolute;top:20px;left:20px;z-index:999999;background:rgba(255,0,0,0.85);color:#fff;padding:10px 12px;border-radius:10px;font:16px Arial;">
-  DEBUG: overlay HTML loaded
-</div>
     <div id="status"></div>
 
     <div id="bottomBar">
@@ -204,14 +201,15 @@
     </div>
   </div>
 
-  <!-- Supabase JS (UMD) -->
-<script>
-  window.SUPABASE_URL = "https://mpvzicatxjzoaxtlieyw.supabase.co";
-window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wdnppY2F0eGp6b2F4dGxpZXl3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMzEyOTcsImV4cCI6MjA4NzcwNzI5N30.QmpgY48F1_5OBeW0J8HQ_TDWfFy_rds-vnlDRtpFEqk";
-</script>
+  <!-- Inline config (you can keep this, or move to config.js if you want) -->
+  <script>
+    window.SUPABASE_URL = "https://mpvzicatxjzoaxtlieyw.supabase.co";
+    window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wdnppY2F0eGp6b2F4dGxpZXl3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxMzEyOTcsImV4cCI6MjA4NzcwNzI5N30.QmpgY48F1_5OBeW0J8HQ_TDWfFy_rds-vnlDRtpFEqk";
+  </script>
 
-<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+  <!-- Supabase JS (UMD) - LOAD ONCE -->
   <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+
   <script>
     /********************
      * CONFIG (EDIT IF NEEDED)
@@ -223,13 +221,13 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
       STREAM_STATE_ACTIVE_GAME_COL: "active_game_id",
 
       GAMES_TABLE: "games",
-      GAME_ID_COL: "id",
-      GAME_SIDE_A_SCORE_COL: "side_a_score",
-      GAME_SIDE_B_SCORE_COL: "side_b_score",
+      GAME_ID_COL: "game_id",              // <-- IMPORTANT: your app uses game_id, not id
+      GAME_SIDE_A_SCORE_COL: "final_score_a", // <-- if you want live score, you need an actual column or compute from events
+      GAME_SIDE_B_SCORE_COL: "final_score_b",
 
       PLAYERS_TABLE: "players",
       PLAYER_GAME_ID_COL: "game_id",
-      PLAYER_ID_COL: "id",
+      PLAYER_ID_COL: "player_id",
       PLAYER_NAME_COL: "name",
       PLAYER_SIDE_COL: "side",              // expect "Side A" / "Side B"
       PLAYER_STATLINE_COL: "stat_line"      // already formatted string (like your app)
@@ -250,7 +248,39 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
     }
 
     /********************
-     * SUPABASE INIT
+     * HELPERS
+     ********************/
+    function escapeHtml(s){
+      return String(s ?? "")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+
+    function cardHTML(player){
+      const id = player[CONFIG.PLAYER_ID_COL];
+      const name = player[CONFIG.PLAYER_NAME_COL] ?? "—";
+      const line = player[CONFIG.PLAYER_STATLINE_COL] ?? "";
+      return `
+        <div class="playerCard" id="player-${escapeHtml(id)}">
+          <div class="playerName">${escapeHtml(name)}</div>
+          <div class="playerLine">${escapeHtml(line)}</div>
+        </div>
+      `;
+    }
+
+    function flashPlayer(playerId){
+      const el = document.getElementById(`player-${playerId}`);
+      if (!el) return;
+      el.classList.remove("flash");
+      void el.offsetWidth;
+      el.classList.add("flash");
+    }
+
+    /********************
+     * SUPABASE INIT (NO NAME COLLISION)
      ********************/
     function getParam(name){
       const url = new URL(window.location.href);
@@ -268,10 +298,11 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
       "";
 
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY){
-      setStatus("Overlay not configured. Set window.SUPABASE_URL and window.SUPABASE_ANON_KEY (recommended), or load with ?supabaseUrl=...&supabaseKey=...");
+      setStatus("Overlay not configured. Set window.SUPABASE_URL and window.SUPABASE_ANON_KEY, or load with ?supabaseUrl=...&supabaseKey=...");
     }
 
-    const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
+    // IMPORTANT: do NOT name this `supabase`
+    const sbClient = (SUPABASE_URL && SUPABASE_ANON_KEY)
       ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
       : null;
 
@@ -280,52 +311,19 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
      ********************/
     let lastStatByPlayerId = new Map();
 
-    function cardHTML(player){
-      const id = player[CONFIG.PLAYER_ID_COL];
-      const name = player[CONFIG.PLAYER_NAME_COL] ?? "—";
-      const line = player[CONFIG.PLAYER_STATLINE_COL] ?? "";
-
-      return `
-        <div class="playerCard" id="player-${id}">
-          <div class="playerName">${escapeHtml(name)}</div>
-          <div class="playerLine">${escapeHtml(line)}</div>
-        </div>
-      `;
-    }
-
-    function escapeHtml(s){
-      return String(s)
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
-        .replaceAll("'","&#039;");
-    }
-
-    function flashPlayer(playerId){
-      const el = document.getElementById(`player-${playerId}`);
-      if (!el) return;
-      el.classList.remove("flash");
-      void el.offsetWidth; // restart animation
-      el.classList.add("flash");
-    }
-
     function render(gameRow, players){
-      // Scores
       const a = gameRow?.[CONFIG.GAME_SIDE_A_SCORE_COL] ?? 0;
       const b = gameRow?.[CONFIG.GAME_SIDE_B_SCORE_COL] ?? 0;
       sideAScoreEl.textContent = a;
       sideBScoreEl.textContent = b;
 
-      // Group players by side label
-      const sideA = players.filter(p => (p[CONFIG.PLAYER_SIDE_COL] ?? "").toLowerCase() === "side a");
-      const sideB = players.filter(p => (p[CONFIG.PLAYER_SIDE_COL] ?? "").toLowerCase() === "side b");
+      const sideA = (players || []).filter(p => (p[CONFIG.PLAYER_SIDE_COL] ?? "").toLowerCase() === "side a");
+      const sideB = (players || []).filter(p => (p[CONFIG.PLAYER_SIDE_COL] ?? "").toLowerCase() === "side b");
 
       sideACol.innerHTML = sideA.map(cardHTML).join("");
       sideBCol.innerHTML = sideB.map(cardHTML).join("");
 
-      // Highlight anyone whose stat line changed
-      for (const p of players){
+      for (const p of (players || [])){
         const pid = p[CONFIG.PLAYER_ID_COL];
         const newLine = p[CONFIG.PLAYER_STATLINE_COL] ?? "";
         const oldLine = lastStatByPlayerId.get(pid);
@@ -352,7 +350,7 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
     }
 
     async function loadActiveGameId(){
-      const { data, error } = await supabase
+      const { data, error } = await sbClient
         .from(CONFIG.STREAM_STATE_TABLE)
         .select(`${CONFIG.STREAM_STATE_ACTIVE_GAME_COL}`)
         .eq(CONFIG.STREAM_STATE_PK_COL, CONFIG.STREAM_STATE_PK_VAL)
@@ -369,7 +367,7 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
 
     async function loadGame(gameId){
       // Fetch game
-      const { data: gameRow, error: gameErr } = await supabase
+      const { data: gameRow, error: gameErr } = await sbClient
         .from(CONFIG.GAMES_TABLE)
         .select("*")
         .eq(CONFIG.GAME_ID_COL, gameId)
@@ -381,8 +379,8 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
         return;
       }
 
-      // Fetch players
-      const { data: players, error: playersErr } = await supabase
+      // Fetch players (ONLY works if you actually store per-game player rows in `players`)
+      const { data: players, error: playersErr } = await sbClient
         .from(CONFIG.PLAYERS_TABLE)
         .select("*")
         .eq(CONFIG.PLAYER_GAME_ID_COL, gameId);
@@ -400,8 +398,7 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
      * REALTIME SUBSCRIPTIONS
      ********************/
     async function subscribeStreamState(){
-      // Listen for active_game_id changes
-      supabase
+      sbClient
         .channel("stream_state_changes")
         .on(
           "postgres_changes",
@@ -412,8 +409,17 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
             filter: `${CONFIG.STREAM_STATE_PK_COL}=eq.${CONFIG.STREAM_STATE_PK_VAL}`
           },
           async (payload) => {
-            const next = payload.new?.[CONFIG.STREAM_STATE_ACTIVE_GAME_COL];
-            if (next && next !== activeGameId){
+            const next = payload.new?.[CONFIG.STREAM_STATE_ACTIVE_GAME_COL] ?? null;
+            if (next !== activeGameId){
+              if (!next){
+                activeGameId = null;
+                sideAScoreEl.textContent = "0";
+                sideBScoreEl.textContent = "0";
+                sideACol.innerHTML = "";
+                sideBCol.innerHTML = "";
+                setStatus("No active game set yet.");
+                return;
+              }
               await switchActiveGame(next);
             }
           }
@@ -422,14 +428,12 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
     }
 
     async function subscribeLiveGame(gameId){
-      // Clean up previous channel
       if (liveGameChannel){
-        try { await supabase.removeChannel(liveGameChannel); } catch(e){}
+        try { await sbClient.removeChannel(liveGameChannel); } catch(e){}
         liveGameChannel = null;
       }
 
-      // One channel to listen to changes on BOTH tables, filtered by game_id
-      liveGameChannel = supabase
+      liveGameChannel = sbClient
         .channel(`live_game_${gameId}`)
         .on(
           "postgres_changes",
@@ -456,7 +460,7 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
 
     async function switchActiveGame(gameId){
       activeGameId = gameId;
-      lastStatByPlayerId = new Map(); // reset highlight baseline for new game
+      lastStatByPlayerId = new Map();
       await subscribeLiveGame(gameId);
       await loadGame(gameId);
     }
@@ -465,12 +469,10 @@ window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXB
      * BOOT
      ********************/
     (async function boot(){
-      if (!supabase) return;
+      if (!sbClient) return;
 
-      // 1) Subscribe to stream_state changes (game switching)
       await subscribeStreamState();
 
-      // 2) Load current active game and subscribe to it
       const gid = await loadActiveGameId();
       if (!gid){
         setStatus("No active game set yet. Set stream_state.active_game_id to a game id.");
