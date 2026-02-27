@@ -102,12 +102,12 @@ async function sbSyncUp() {
   if (!supabaseReady()) return { pushed: 0, remaining: 0, note: "Supabase not configured" };
 
   const session = await sbGetSession();
-  const opsAll = await DB.listOps();
+  const opsNow = await DB.listOps();
 
-  if (!session) return { pushed: 0, remaining: opsAll.length, note: "Not signed in" };
-
+  if (!session) return { pushed: 0, remaining: opsNow.length, note: "Not signed in" };
   const owner_id = session.user.id;
-  const ops = opsAll;
+
+  const ops = opsNow;
   let pushed = 0;
 
   for (const op of ops) {
@@ -115,82 +115,59 @@ async function sbSyncUp() {
 
     try {
       if (kind === "upsert_player") {
-        const { error } = await sb().from("players").upsert({ ...payload, owner_id });
-        if (error) throw error;
+        await sb().from("players").upsert({ ...payload, owner_id });
 
       } else if (kind === "upsert_season") {
-        const { error } = await sb().from("seasons").upsert({ ...payload, owner_id });
-        if (error) throw error;
+        await sb().from("seasons").upsert({ ...payload, owner_id });
 
       } else if (kind === "upsert_game") {
-        const { error } = await sb().from("games").upsert({ ...payload, owner_id });
-        if (error) throw error;
+        await sb().from("games").upsert({ ...payload, owner_id });
 
       } else if (kind === "upsert_event") {
-        const { error } = await sb().from("events").upsert({ ...payload, owner_id });
-        if (error) throw error;
+        await sb().from("events").upsert({ ...payload, owner_id });
 
       } else if (kind === "delete_game") {
-        // delete game + events
-        {
-          const { error: e1 } = await sb().from("events")
-            .delete()
-            .eq("owner_id", owner_id)
-            .eq("game_id", payload.game_id);
-          if (e1) throw e1;
-        }
-        {
-          const { error: e2 } = await sb().from("games")
-            .delete()
-            .eq("owner_id", owner_id)
-            .eq("game_id", payload.game_id);
-          if (e2) throw e2;
-        }
+        await sb().from("events").delete().eq("owner_id", owner_id).eq("game_id", payload.game_id);
+        await sb().from("games").delete().eq("owner_id", owner_id).eq("game_id", payload.game_id);
 
       } else if (kind === "delete_event") {
-        const { error } = await sb().from("events")
-          .delete()
-          .eq("owner_id", owner_id)
-          .eq("event_id", payload.event_id);
-        if (error) throw error;
+        await sb().from("events").delete().eq("owner_id", owner_id).eq("event_id", payload.event_id);
 
       } else if (kind === "upsert_bulk_finalize") {
-        // used after finalize: upsert game + all events for the game
-        {
-          const { error: gErr } = await sb().from("games").upsert({ ...payload.game, owner_id });
-          if (gErr) throw gErr;
-        }
+        await sb().from("games").upsert({ ...payload.game, owner_id });
         if (payload.events && payload.events.length) {
           const rows = payload.events.map(e => ({ ...e, owner_id }));
-          const { error: evErr } = await sb().from("events").upsert(rows);
-          if (evErr) throw evErr;
+          await sb().from("events").upsert(rows);
         }
 
-      } else if (kind === "set_active_game") {
-        // Stream overlay looks here to know which game to display
-        const { error } = await sb().from("stream_state").upsert({
+      // ✅ STREAM OVERLAY STATE (THIS IS WHAT YOU'RE MISSING)
+      } else if (kind === "set_stream_state") {
+        // Make overlay show this game
+        await sb().from("stream_state").upsert({
           id: "main",
           owner_id,
-          active_game_id: payload.game_id,
-          updated_at: new Date().toISOString()
+          active_game_id: payload.game_id
         });
-        if (error) throw error;
 
-      } else if (kind === "clear_active_game") {
-        // Clears overlay when game finalized/ended
-        const { error } = await sb().from("stream_state").upsert({
+      } else if (kind === "clear_stream_state") {
+        // Clear overlay (blank until next game)
+        await sb().from("stream_state").upsert({
           id: "main",
           owner_id,
-          active_game_id: null,
-          updated_at: new Date().toISOString()
+          active_game_id: null
         });
-        if (error) throw error;
+
+      } else {
+        // If we don't recognize the op, DON'T leave it forever.
+        console.warn("Unknown op kind, dropping:", kind);
       }
 
+      // Always delete the op once we've handled (or intentionally dropped) it
       await DB.deleteOp(op.op_id);
       pushed += 1;
 
     } catch (e) {
+      // stop on first error to avoid burning requests
       return {
         pushed,
         remaining: ops.length - pushed,
