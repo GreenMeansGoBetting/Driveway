@@ -79,8 +79,31 @@ function el(tag, attrs={}, children=[]){
 
 function setRoute(r){
   state.route=r;
+  document.body.classList.toggle("route-live", r==="live");
+  const bm=document.getElementById("btnMenu");
+  if(bm) bm.style.display = (r==="live") ? "" : "none";
   document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active", b.dataset.route===r));
   render();
+}
+
+function openMenu(){
+  const open = state.openGame && state.openGame.finalized===false;
+  const items = [
+    {r:"home", label:"Home"},
+    {r:"start", label:"Start Game"},
+    {r:"players", label:"Players"},
+    {r:"dashboard", label:"Dashboard"},
+    {r:"leaderboard", label:"Leaderboard"},
+    {r:"awards", label:"Awards"},
+    {r:"records", label:"Records"},
+    {r:"draft", label:"Draft"},
+  ];
+  let body = '<div class="p" style="margin:0;">';
+  for(const it of items){
+    body += `<button class="btn ghost" style="width:100%; justify-content:flex-start; margin-top:8px;" onclick="window.__goRoute('${it.r}')">${it.label}</button>`;
+  }
+  body += '</div>';
+  showModal(open ? "Menu (game in progress)" : "Menu", body, [{label:"Close", kind:"ghost"}]);
 }
 
 function showModal(title, bodyHtml, actions){
@@ -179,6 +202,7 @@ async function init(){
 
   
   $("#btnResume").addEventListener("click", ()=>setRoute("live"));
+  $("#btnMenu").addEventListener("click", ()=>openMenu());
 
   $("#btnSignOut").addEventListener("click", async()=>{
     try{

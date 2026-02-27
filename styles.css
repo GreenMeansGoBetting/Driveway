@@ -222,3 +222,6 @@ body{
 
 .recent-actions{ display:flex; gap:8px; flex-wrap:nowrap; overflow-x:auto; padding-bottom:4px; }
 .recent-chip{ white-space:nowrap; padding:6px 10px; border:1px solid var(--border); border-radius:999px; background: rgba(255,255,255,.03); font-size:12px; }
+
+.route-live .app-nav{ display:none; }
+.live-sticky{ position: sticky; top: calc(env(safe-area-inset-top) + 70px); z-index: 9; }
