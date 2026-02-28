@@ -45,21 +45,33 @@
   <div class="modal" id="modal" hidden></div>
 
   <!-- 1) Put your Supabase URL + anon key in config.js -->
-  <script src="config.js"></script>
+  <script src="config.js?v=9.3"></script>
 
   <!-- 2) Supabase JS SDK (loaded from CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <!-- App scripts -->
-  <script src="db.js"></script>
-  <script src="supabase_client.js"></script>
-  <script src="export.js"></script>
-  <script src="app.js"></script>
+  <script src="db.js?v=9.3"></script>
+  <script src="supabase_client.js?v=9.3"></script>
+  <script src="export.js?v=9.3"></script>
+  <script src="app.js?v=9.3"></script>
 
   <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => navigator.serviceWorker.register('service-worker.js').catch(()=>{}));
-    }
-  </script>
+  // v9.3: disable service worker to prevent stale-cache issues
+  (async () => {
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+      if (window.caches) {
+        const keys = await caches.keys();
+        for (const k of keys) {
+          if (k.startsWith('driveway-stats-')) await caches.delete(k);
+        }
+      }
+    } catch (e) {}
+  })();
+</script>
 </body>
 </html>

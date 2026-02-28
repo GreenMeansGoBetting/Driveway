@@ -173,6 +173,11 @@ async function init(){
   $("#btnExportQuick").addEventListener("click", async()=>{ if(state.season) await exportSeason(state.season); });
 
   $("#btnSync").addEventListener("click", async()=>{
+    if (typeof sbHealth !== "function") {
+      showToast("Cloud not loaded. Refresh the page (Safari: pull down to refresh).");
+      return;
+    }
+
     if ((await sbHealth())._missing) { alert("Cloud scripts failed to load (cached old files). Close the app completely and reopen. If still broken: iOS Settings → Safari → Advanced → Website Data → delete your site, then reload."); return; }
 
     try{
