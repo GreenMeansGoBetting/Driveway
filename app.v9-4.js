@@ -65,6 +65,29 @@ async function scheduleLiveCloudSync(){
 
 
 function $(sel){ return document.querySelector(sel); }
+
+function showToast(msg){
+  try{
+    const t = document.createElement("div");
+    t.textContent = String(msg);
+    t.style.position = "fixed";
+    t.style.left = "50%";
+    t.style.bottom = "18px";
+    t.style.transform = "translateX(-50%)";
+    t.style.zIndex = "9999";
+    t.style.padding = "10px 14px";
+    t.style.borderRadius = "999px";
+    t.style.border = "1px solid rgba(255,255,255,.18)";
+    t.style.background = "rgba(0,0,0,.75)";
+    t.style.color = "white";
+    t.style.fontSize = "13px";
+    document.body.appendChild(t);
+    setTimeout(()=>{ try{ t.remove(); }catch(e){} }, 2200);
+  } catch(e){
+    try{ alert(msg); }catch(_){}
+  }
+}
+
 function el(tag, attrs={}, children=[]){
   const n=document.createElement(tag);
   for(const [k,v] of Object.entries(attrs)){
