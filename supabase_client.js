@@ -139,48 +139,55 @@ async function sbHealth() {
 async function sbFetchAllEvents(){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const { data, error } = await sb().from("events").select("*").eq("owner_id", h.owner_id).order("timestamp", {ascending:true});
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const { data, error } = await sb().from("events").select("*").eq("owner_id", uid).order("timestamp", {ascending:true});
   if(error) throw error;
   return data || [];
 }
 async function sbFetchPlayers(){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const { data, error } = await sb().from("players").select("*").eq("owner_id", h.owner_id);
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const { data, error } = await sb().from("players").select("*").eq("owner_id", uid);
   if(error) throw error;
   return data || [];
 }
 async function sbFetchGames(){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const { data, error } = await sb().from("games").select("*").eq("owner_id", h.owner_id);
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const { data, error } = await sb().from("games").select("*").eq("owner_id", uid);
   if(error) throw error;
   return data || [];
 }
 async function sbFetchSeasons(){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const { data, error } = await sb().from("seasons").select("*").eq("owner_id", h.owner_id);
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const { data, error } = await sb().from("seasons").select("*").eq("owner_id", uid);
   if(error) throw error;
   return data || [];
 }
 async function sbUpsertPlayers(players){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const payload = (players||[]).map(p=>({ ...p, owner_id: h.owner_id }));
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const payload = (players||[]).map(p=>({ ...p, owner_id: uid }));
   const { error } = await sb().from("players").upsert(payload);
   if(error) throw error;
 }
 async function sbUpsertSeason(season){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const { error } = await sb().from("seasons").upsert({ ...season, owner_id: h.owner_id });
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const { error } = await sb().from("seasons").upsert({ ...season, owner_id: uid });
   if(error) throw error;
 }
 async function sbUpsertGame(game){
   const h = await sbHealth();
   if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const { error } = await sb().from("games").upsert({ ...game, owner_id: h.owner_id });
+  const uid = (await sb().auth.getUser()).data.user.id;
+  const { error } = await sb().from("games").upsert({ ...game, owner_id: uid });
   if(error) throw error;
 }
 // expose
