@@ -58,22 +58,16 @@ async function sbSyncDown() {
     fetchAll("events"),
   ]);
 
-  // merge into local (never wipe local on sync-down)
+  // overwrite local
+  await DB.clearPlayers();
+  await DB.clearSeasons();
+  await DB.clearGames();
+  await DB.clearEvents();
+
   for (const p of players) await DB.putPlayer(p);
   for (const s of seasons) await DB.putSeason(s);
   for (const g of games) await DB.putGame(g);
   for (const e of events) await DB.putEvent(e);
-
-  // prune local finalized games that no longer exist in cloud (supports deletes across devices)
-  if (games.length){
-    const cloudGameIds = new Set(games.map(g=>g.game_id));
-    const localFinal = await DB.listAllFinalizedGames();
-    for (const lg of localFinal){
-      if (!cloudGameIds.has(lg.game_id)){
-        await DB.deleteGame(lg.game_id); // deletes local events for that game too
-      }
-    }
-  }
 
   // set current season if exists
   const current = seasons.find(x => !x.archived) || null;
@@ -140,3 +134,60 @@ async function sbHealth() {
     pending_ops: ops.length
   };
 }
+
+
+async function sbFetchAllEvents(){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const { data, error } = await sb().from("events").select("*").eq("owner_id", h.owner_id).order("timestamp", {ascending:true});
+  if(error) throw error;
+  return data || [];
+}
+async function sbFetchPlayers(){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const { data, error } = await sb().from("players").select("*").eq("owner_id", h.owner_id);
+  if(error) throw error;
+  return data || [];
+}
+async function sbFetchGames(){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const { data, error } = await sb().from("games").select("*").eq("owner_id", h.owner_id);
+  if(error) throw error;
+  return data || [];
+}
+async function sbFetchSeasons(){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const { data, error } = await sb().from("seasons").select("*").eq("owner_id", h.owner_id);
+  if(error) throw error;
+  return data || [];
+}
+async function sbUpsertPlayers(players){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const payload = (players||[]).map(p=>({ ...p, owner_id: h.owner_id }));
+  const { error } = await sb().from("players").upsert(payload);
+  if(error) throw error;
+}
+async function sbUpsertSeason(season){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const { error } = await sb().from("seasons").upsert({ ...season, owner_id: h.owner_id });
+  if(error) throw error;
+}
+async function sbUpsertGame(game){
+  const h = await sbHealth();
+  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
+  const { error } = await sb().from("games").upsert({ ...game, owner_id: h.owner_id });
+  if(error) throw error;
+}
+// expose
+window.sbFetchAllEvents = sbFetchAllEvents;
+window.sbFetchPlayers = sbFetchPlayers;
+window.sbFetchGames = sbFetchGames;
+window.sbFetchSeasons = sbFetchSeasons;
+window.sbUpsertPlayers = sbUpsertPlayers;
+window.sbUpsertSeason = sbUpsertSeason;
+window.sbUpsertGame = sbUpsertGame;
