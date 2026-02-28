@@ -1,5 +1,5 @@
 // Simple offline cache for core assets
-const CACHE = "driveway-stats-v9-1";
+const CACHE = "driveway-stats-v9-2";
 const ASSETS = [
   "./",
   "./index.html",
