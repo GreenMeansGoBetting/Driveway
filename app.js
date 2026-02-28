@@ -1478,7 +1478,73 @@ async function showPlayerModal(player_id){
   }
   html += `</tbody></table>`;
 
-  showModal("Player", html, [{label:"Close", kind:"ghost"}]);
+  showModal("Player", html, [{label:"Game Log", kind:"ok", onclick:()=>showPlayerGameLog(player_id)}, {label:"Close", kind:"ghost"}]);
+}
+
+async function showPlayerGameLog(player_id){
+  const playersAll=await DB.listPlayers(false);
+  const playersById=new Map(playersAll.map(p=>[p.player_id,p]));
+  const name=(id)=>playersById.get(id)?.name||"—";
+
+  const games=(await DB.listAllFinalizedGames()).sort((a,b)=>b.played_at.localeCompare(a.played_at));
+  const rows=[];
+  for(const g of games){
+    if(!g.sideA_player_ids.includes(player_id) && !g.sideB_player_ids.includes(player_id)) continue;
+    const evs=await DB.listEventsForGame(g.game_id);
+    const box=computeFromEvents(g, evs);
+
+    const side = g.sideA_player_ids.includes(player_id) ? "A" : "B";
+    const [a1,a2]=g.sideA_player_ids;
+    const [b1,b2]=g.sideB_player_ids;
+    const teammate = (side==="A") ? (player_id===a1?a2:a1) : (player_id===b1?b2:b1);
+    const opp = (side==="A") ? [b1,b2] : [a1,a2];
+    const won = (side===g.winner_side);
+
+    const line=box.lines.get(player_id);
+    const d=box.derived(player_id);
+    const pts=d.pts;
+    const twoM=line["2PM"], twoA=d.twoA;
+    const threeM=line["3PM"], threeA=d.threeA;
+    const reb=line["OREB"]+line["DREB"];
+    const ast=line["AST"], stl=line["STL"], blk=line["BLK"];
+
+    rows.push({
+      game:g,
+      date:g.played_at.slice(0,10),
+      wl: won ? "W" : "L",
+      teammate:name(teammate),
+      vs: `${name(opp[0])} + ${name(opp[1])}`,
+      pts, twoM, twoA, threeM, threeA, reb, ast, stl, blk
+    });
+  }
+
+  let html = `<div class="p"><b>${name(player_id)}</b><br/><span class="muted">Game log (all-time) • ${rows.length} games</span></div>`;
+  if(!rows.length){
+    html += `<div class="p">No games found.</div>`;
+    showModal("Game Log", html, [{label:"Back", kind:"ghost", onclick:()=>showPlayerModal(player_id)}]);
+    return;
+  }
+
+  html += `<table class="table" style="margin-top:12px;"><thead>
+    <tr><th>Date</th><th>W/L</th><th>PTS</th><th>2P</th><th>3P</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th><th>Teammate</th><th>vs</th></tr>
+  </thead><tbody>`;
+  for(const r of rows){
+    html += `<tr style="cursor:pointer" onclick="window.__openGame('${r.game.game_id}')">
+      <td>${r.date}</td>
+      <td><b>${r.wl}</b></td>
+      <td><b>${r.pts}</b></td>
+      <td>${r.twoM}/${r.twoA}</td>
+      <td>${r.threeM}/${r.threeA}</td>
+      <td>${r.reb}</td>
+      <td>${r.ast}</td>
+      <td>${r.stl}</td>
+      <td>${r.blk}</td>
+      <td>${r.teammate}</td>
+      <td>${r.vs}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  showModal("Game Log", html, [{label:"Back", kind:"ghost", onclick:()=>showPlayerModal(player_id)}, {label:"Close", kind:"ghost"}]);
 }
 
 async function renderLeaderboard(app){

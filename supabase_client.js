@@ -58,25 +58,32 @@ async function sbSyncDown() {
     fetchAll("events"),
   ]);
 
-  // overwrite local
-  await DB.clearPlayers();
-  await DB.clearSeasons();
-  await DB.clearGames();
-  await DB.clearEvents();
+  // SAFETY: never wipe local if cloud is empty (prevents accidental data loss)
+  const cloudEmpty = (players.length===0 && seasons.length===0 && games.length===0 && events.length===0);
+  if (cloudEmpty) {
+    return { players: 0, seasons: 0, games: 0, events: 0, note: "Cloud empty; local untouched" };
+  }
 
+  // Merge into local (upsert), instead of clearing first
   for (const p of players) await DB.putPlayer(p);
   for (const s of seasons) await DB.putSeason(s);
   for (const g of games) await DB.putGame(g);
   for (const e of events) await DB.putEvent(e);
 
-  // set current season if exists
-  const current = seasons.find(x => !x.archived) || null;
-  if (current) await DB.setSetting("current_season_id", current.season_id);
+  // Choose current season: latest non-archived by created_at/season_id fallback
+  const nonArchived = seasons.filter(x=>!x.archived);
+  const pick = (nonArchived.length ? nonArchived : seasons).sort((a,b)=>{
+    const da = (a.created_at||a.season_id||"");
+    const db = (b.created_at||b.season_id||"");
+    return String(db).localeCompare(String(da));
+  })[0] || null;
+  if (pick) await DB.setSetting("current_season_id", pick.season_id);
 
   return { players: players.length, seasons: seasons.length, games: games.length, events: events.length };
 }
 
 // Sync-up: pushes queued ops from outbox
+: pushes queued ops from outbox
 async function sbSyncUp() {
   if (!supabaseReady()) return { pushed: 0, remaining: 0, note: "Supabase not configured" };
   const session = await sbGetSession();
