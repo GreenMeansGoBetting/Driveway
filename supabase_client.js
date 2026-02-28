@@ -58,16 +58,22 @@ async function sbSyncDown() {
     fetchAll("events"),
   ]);
 
-  // overwrite local
-  await DB.clearPlayers();
-  await DB.clearSeasons();
-  await DB.clearGames();
-  await DB.clearEvents();
-
+  // merge into local (never wipe local on sync-down)
   for (const p of players) await DB.putPlayer(p);
   for (const s of seasons) await DB.putSeason(s);
   for (const g of games) await DB.putGame(g);
   for (const e of events) await DB.putEvent(e);
+
+  // prune local finalized games that no longer exist in cloud (supports deletes across devices)
+  if (games.length){
+    const cloudGameIds = new Set(games.map(g=>g.game_id));
+    const localFinal = await DB.listAllFinalizedGames();
+    for (const lg of localFinal){
+      if (!cloudGameIds.has(lg.game_id)){
+        await DB.deleteGame(lg.game_id); // deletes local events for that game too
+      }
+    }
+  }
 
   // set current season if exists
   const current = seasons.find(x => !x.archived) || null;
