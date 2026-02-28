@@ -13,22 +13,6 @@ function sb() {
     if (!supabaseReady()) throw new Error("Supabase config missing");
     SB = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
   }
-
-async function sbUid(){
-  // robust uid getter for iOS/PWA timing issues
-  try{
-    const sess = await sb().auth.getSession();
-    const u1 = sess && sess.data && sess.data.session && sess.data.session.user && sess.data.session.user.id;
-    if(u1) return u1;
-  }catch(e){}
-  try{
-    const gu = await sb().auth.getUser();
-    const u2 = gu && gu.data && gu.data.user && gu.data.user.id;
-    if(u2) return u2;
-  }catch(e){}
-  return null;
-}
-
   return SB;
 }
 
@@ -150,74 +134,3 @@ async function sbHealth() {
     pending_ops: ops.length
   };
 }
-
-
-async function sbFetchAllEvents(){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const uid = await sbUid();
-  if(!uid) throw new Error("No auth session (try signing in again)");
-  const { data, error } = await sb().from("events").select("*").order("timestamp", {ascending:true});
-  if(error) throw error;
-  return data || [];
-}
-async function sbFetchPlayers(){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const uid = await sbUid();
-  if(!uid) throw new Error("No auth session (try signing in again)");
-  const { data, error } = await sb().from("players").select("*");
-  if(error) throw error;
-  return data || [];
-}
-async function sbFetchGames(){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const uid = await sbUid();
-  if(!uid) throw new Error("No auth session (try signing in again)");
-  const { data, error } = await sb().from("games").select("*");
-  if(error) throw error;
-  return data || [];
-}
-async function sbFetchSeasons(){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const uid = await sbUid();
-  if(!uid) throw new Error("No auth session (try signing in again)");
-  const { data, error } = await sb().from("seasons").select("*");
-  if(error) throw error;
-  return data || [];
-}
-async function sbUpsertPlayers(players){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const sess = await sb().auth.getSession();
-  if(!(sess && sess.data && sess.data.session)) throw new Error("No auth session (try signing in again)");
-  const payload = (players||[]).map(p=>({ ...p }));
-  const { error } = await sb().from("players").upsert(payload);
-  if(error) throw error;
-}
-async function sbUpsertSeason(season){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const sess = await sb().auth.getSession();
-  if(!(sess && sess.data && sess.data.session)) throw new Error("No auth session (try signing in again)");
-  const { error } = await sb().from("seasons").upsert({ ...season });
-  if(error) throw error;
-}
-async function sbUpsertGame(game){
-  const h = await sbHealth();
-  if(!h.configured || !h.signed_in) throw new Error("Not signed in");
-  const sess = await sb().auth.getSession();
-  if(!(sess && sess.data && sess.data.session)) throw new Error("No auth session (try signing in again)");
-  const { error } = await sb().from("games").upsert({ ...game });
-  if(error) throw error;
-}
-// expose
-window.sbFetchAllEvents = sbFetchAllEvents;
-window.sbFetchPlayers = sbFetchPlayers;
-window.sbFetchGames = sbFetchGames;
-window.sbFetchSeasons = sbFetchSeasons;
-window.sbUpsertPlayers = sbUpsertPlayers;
-window.sbUpsertSeason = sbUpsertSeason;
-window.sbUpsertGame = sbUpsertGame;

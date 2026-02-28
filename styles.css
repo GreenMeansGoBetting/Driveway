@@ -53,15 +53,11 @@ body{
   background: rgba(11,18,32,.8);
   backdrop-filter: blur(10px);
   border-top:1px solid var(--border);
-  display:flex;
+  display:grid;
+  grid-template-columns: repeat(4, 1fr);
   gap:10px;
-  overflow-x:auto;
-  -webkit-overflow-scrolling: touch;
-}
-
+ overflow-x:auto; white-space:nowrap;}
 .nav-btn{
-  flex:0 0 auto;
-  min-width:110px;
   height:46px;
   border-radius:16px;
   border:1px solid var(--border);

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>Driveway Stats – Recovery</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .wrap{max-width:980px;margin:0 auto;padding:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .row > *{flex:0 0 auto}
+    .table{width:100%;border-collapse:collapse;margin-top:10px}
+    .table th,.table td{border-bottom:1px solid rgba(255,255,255,.08);padding:8px 6px;font-size:13px;text-align:left;vertical-align:top}
+    .pill{display:inline-block;padding:2px 8px;border:1px solid rgba(255,255,255,.12);border-radius:999px;font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    @media (max-width: 720px){.grid{grid-template-columns:1fr}}
+    .mini{font-size:12px;opacity:.85}
+    .err{color:#ffb4b4}
+    .ok{color:#b7ffcc}
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="logo">🛠️</div>
+      <div class="brand-text">
+        <div class="brand-title">Recovery</div>
+        <div class="brand-sub">Rebuild missing games from cloud events (safe).</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a class="btn ghost" href="./">Back to app</a>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <div class="wrap">
+      <div class="card section">
+        <b>When to use this</b>
+        <div class="muted" style="margin-top:6px">
+          Use this if <span class="pill">events</span> exist in Supabase but <span class="pill">games</span> rows are missing (so history is blank).
+          This tool will:
+          <ul>
+            <li>Load your cloud events</li>
+            <li>Group them by <code>game_id</code></li>
+            <li>Let you choose teammates + winner for each game</li>
+            <li>Create the missing <b>games</b> rows (and optionally a season)</li>
+          </ul>
+          It does <b>not</b> modify events.
+        </div>
+      </div>
+
+      <div class="card section">
+        <b>1) Sign in</b>
+        <div class="row" style="margin-top:10px">
+          <input id="email" class="input" placeholder="Email" style="min-width:240px">
+          <input id="password" class="input" placeholder="Password" type="password" style="min-width:200px">
+          <button id="btnSignIn" class="btn">Sign in</button>
+          <span id="authStatus" class="mini muted"></span>
+        </div>
+        <div class="mini muted" style="margin-top:8px">Use the same shared login you use in the main app.</div>
+      </div>
+
+      <div class="card section">
+        <b>2) Load cloud data</b>
+        <div class="row" style="margin-top:10px">
+          <button id="btnLoad" class="btn ghost" disabled>Load events + players</button>
+          <button id="btnBuild" class="btn" disabled>Create games in cloud</button>
+          <span id="loadStatus" class="mini muted"></span>
+        </div>
+        <div id="summary" class="mini muted" style="margin-top:10px"></div>
+      </div>
+
+      <div id="games"></div>
+
+      <div class="card section">
+        <b>Notes</b>
+        <div class="muted mini" style="margin-top:6px">
+          If you have 5 matchups, you should see 5 game cards below after loading.
+          Each card shows the 4 players detected and their points from events (2s/3s).
+          Select which 2 were teammates (Side A). Side B auto-fills. Choose winner.
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    const $ = (s)=>document.querySelector(s);
+    const el = (tag, props={})=>{
+      const n=document.createElement(tag);
+      for(const [k,v] of Object.entries(props)){
+        if(k==="class") n.className=v;
+        else if(k==="html") n.innerHTML=v;
+        else if(k==="text") n.textContent=v;
+        else n.setAttribute(k,v);
+      }
+      return n;
+    };
+
+    function configured(){
+      return !!(window.SUPABASE_URL && window.SUPABASE_ANON_KEY && window.SUPABASE_URL.startsWith("http"));
+    }
+
+    const client = (configured())
+      ? supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY)
+      : null;
+
+    function statBlank(){
+      return {twoM:0,twoMi:0,threeM:0,threeMi:0,ast:0,oreb:0,dreb:0,stl:0,blk:0};
+    }
+    function applyEv(s, ev){
+      const d = ev.delta || 1;
+      switch(ev.stat_type){
+        case "2PM": s.twoM += d; break;
+        case "2PMISS": s.twoMi += d; break;
+        case "3PM": s.threeM += d; break;
+        case "3PMISS": s.threeMi += d; break;
+        case "AST": s.ast += d; break;
+        case "OREB": s.oreb += d; break;
+        case "DREB": s.dreb += d; break;
+        case "STL": s.stl += d; break;
+        case "BLK": s.blk += d; break;
+      }
+    }
+    function pts(s){ return s.twoM*2 + s.threeM*3; }
+
+    let cloud = { events:[], players:[], seasons:[], games:[] };
+    let gameForms = new Map(); // gid -> {sideA:Set(pid), winner:"A"/"B"}
+
+    async function refreshAuthStatus(){
+      if(!client){ $("#authStatus").textContent = "Config missing"; return; }
+      const { data } = await client.auth.getSession();
+      const user = data && data.session && data.session.user;
+      $("#authStatus").innerHTML = user ? '<span class="ok">Signed in</span> ' + user.email : '<span class="muted">Signed out</span>';
+      $("#btnLoad").disabled = !user;
+      $("#btnBuild").disabled = true;
+    }
+
+    $("#btnSignIn").addEventListener("click", async ()=>{
+      if(!client){ alert("Supabase config missing."); return; }
+      const email = $("#email").value.trim();
+      const password = $("#password").value;
+      $("#authStatus").textContent = "Signing in…";
+      const { error } = await client.auth.signInWithPassword({ email, password });
+      if(error){ $("#authStatus").innerHTML = '<span class="err">'+error.message+'</span>'; return; }
+      await refreshAuthStatus();
+    });
+
+    async function loadCloud(){
+      $("#loadStatus").textContent = "Loading…";
+      const sess = await client.auth.getSession();
+      if(!(sess && sess.data && sess.data.session)){ $("#loadStatus").textContent="Not signed in"; return; }
+
+      // RLS restricts to your rows; no owner_id filter needed.
+      const [evRes, plRes, seRes, gaRes] = await Promise.all([
+        client.from("events").select("*").order("timestamp", {ascending:true}),
+        client.from("players").select("*"),
+        client.from("seasons").select("*"),
+        client.from("games").select("*")
+      ]);
+
+      if(evRes.error){ $("#loadStatus").innerHTML = '<span class="err">'+evRes.error.message+'</span>'; return; }
+      if(plRes.error){ $("#loadStatus").innerHTML = '<span class="err">'+plRes.error.message+'</span>'; return; }
+      if(seRes.error){ $("#loadStatus").innerHTML = '<span class="err">'+seRes.error.message+'</span>'; return; }
+      if(gaRes.error){ $("#loadStatus").innerHTML = '<span class="err">'+gaRes.error.message+'</span>'; return; }
+
+      cloud.events = evRes.data || [];
+      cloud.players = plRes.data || [];
+      cloud.seasons = seRes.data || [];
+      cloud.games = gaRes.data || [];
+
+      const byGame = new Map();
+      for(const e of cloud.events){
+        if(!byGame.has(e.game_id)) byGame.set(e.game_id, []);
+        byGame.get(e.game_id).push(e);
+      }
+      const existingGameIds = new Set((cloud.games||[]).map(g=>g.game_id));
+      const orphanGameIds = [...byGame.keys()].filter(id=>!existingGameIds.has(id));
+
+      $("#summary").innerHTML = `
+        Events: <b>${cloud.events.length}</b> • Players: <b>${cloud.players.length}</b> • Seasons: <b>${cloud.seasons.length}</b> • Games: <b>${cloud.games.length}</b><br/>
+        Orphan games to rebuild: <b>${orphanGameIds.length}</b>
+      `;
+
+      renderGames(orphanGameIds, byGame);
+      $("#btnBuild").disabled = orphanGameIds.length === 0;
+      $("#loadStatus").innerHTML = '<span class="ok">Loaded</span>';
+    }
+
+    function renderGames(orphanIds, byGame){
+      const playersById = new Map((cloud.players||[]).map(p=>[p.player_id, p]));
+      const wrap = $("#games");
+      wrap.innerHTML = "";
+
+      gameForms = new Map();
+
+      for(const gid of orphanIds){
+        const evs = byGame.get(gid) || [];
+        const pids = [...new Set(evs.map(e=>e.player_id))];
+        // only show first 4 if extras (should be 4)
+        const p4 = pids.slice(0,4);
+
+        const stat = new Map();
+        for(const pid of p4) stat.set(pid, statBlank());
+        for(const e of evs){
+          const s = stat.get(e.player_id);
+          if(!s) continue;
+          applyEv(s, e);
+        }
+
+        const ts = evs.map(e=>e.timestamp).filter(Boolean).sort();
+        const playedAt = ts.length ? ts[ts.length-1] : "";
+
+        const card = el("div",{class:"card section"});
+        card.appendChild(el("div",{html:`<b>Game</b> <span class="muted">${playedAt ? playedAt.slice(0,19).replace("T"," ") : ""}</span><br><span class="mini muted">${gid}</span>`}));
+
+        const grid = el("div",{class:"grid", style:"margin-top:10px;"});
+        const checks = new Map();
+
+        for(const pid of p4){
+          const p = playersById.get(pid);
+          const name = (p && p.name) ? p.name : (pid.slice(0,8)+"…");
+          const s = stat.get(pid);
+          const twoA = s.twoM + s.twoMi;
+          const threeA = s.threeM + s.threeMi;
+          const line = `PTS ${pts(s)} • 2s ${s.twoM}/${twoA} • 3s ${s.threeM}/${threeA} • REB ${s.oreb+s.dreb} • AST ${s.ast} • STL ${s.stl} • BLK ${s.blk}`;
+
+          const box = el("div",{class:"card mini-card"});
+          const top = el("div",{class:"row", style:"justify-content:space-between;align-items:center;gap:10px;"});
+          top.appendChild(el("div",{html:`<b>${name}</b><div class="mini muted">${line}</div>`}));
+          const cb = el("input"); cb.type="checkbox";
+          top.appendChild(cb);
+          box.appendChild(top);
+          grid.appendChild(box);
+          checks.set(pid, cb);
+
+          cb.addEventListener("change", ()=>{
+            const sel = [...checks.entries()].filter(([_,c])=>c.checked).map(([pid])=>pid);
+            if(sel.length>2){ cb.checked=false; return; }
+          });
+        }
+
+        card.appendChild(el("div",{class:"mini muted", html:"Check exactly <b>2</b> players for <b>Side A</b> (teammates). Side B auto-fills."}));
+        card.appendChild(grid);
+
+        const winner = el("select",{class:"input", style:"margin-top:10px; max-width:220px;"});
+        winner.innerHTML = '<option value="A">Winner: Side A</option><option value="B">Winner: Side B</option>';
+        card.appendChild(winner);
+
+        wrap.appendChild(card);
+
+        gameForms.set(gid, {checks, winner, stat, playedAt, p4});
+      }
+    }
+
+    async function ensureSeason(){
+      // Use existing non-archived season if present; else create one.
+      const current = (cloud.seasons||[]).find(s=>!s.archived);
+      if(current) return current;
+      const season = { season_id: crypto.randomUUID(), name:"Driveway 2026", start_date: new Date().toISOString().slice(0,10), archived:false };
+      const res = await client.from("seasons").upsert(season);
+      if(res.error) throw res.error;
+      return season;
+    }
+
+    async function buildGames(){
+      $("#loadStatus").textContent = "Creating games…";
+      const season = await ensureSeason();
+
+      for(const [gid, f] of gameForms.entries()){
+        const sel = [...f.checks.entries()].filter(([_,c])=>c.checked).map(([pid])=>pid);
+        if(sel.length!==2) throw new Error("Each game must have exactly 2 Side A players selected.");
+        const sideA = sel;
+        const sideB = f.p4.filter(pid=>!sideA.includes(pid));
+        if(sideB.length!==2) throw new Error("Each game must have exactly 4 players.");
+
+        const ppts = (pid)=>pts(f.stat.get(pid));
+        const scoreA = ppts(sideA[0]) + ppts(sideA[1]);
+        const scoreB = ppts(sideB[0]) + ppts(sideB[1]);
+
+        const game = {
+          game_id: gid,
+          season_id: season.season_id,
+          played_at: f.playedAt || new Date().toISOString(),
+          sideA_player_ids: sideA,
+          sideB_player_ids: sideB,
+          final_score_a: scoreA,
+          final_score_b: scoreB,
+          winner_side: f.winner.value,
+          finalized: true,
+          notes: "Recovered from events"
+        };
+
+        const res = await client.from("games").upsert(game);
+        if(res.error) throw res.error;
+      }
+
+      $("#loadStatus").innerHTML = '<span class="ok">Games created. Open the main app and hit Sync.</span>';
+    }
+
+    $("#btnLoad").addEventListener("click", loadCloud);
+    $("#btnBuild").addEventListener("click", async ()=>{
+      try{ await buildGames(); }catch(e){ $("#loadStatus").innerHTML = '<span class="err">'+(e.message||e)+'</span>'; }
+    });
+
+    // initial
+    refreshAuthStatus();
+    if(!configured()){
+      $("#summary").innerHTML = '<span class="err">Supabase not configured. Add URL + anon key in config.js</span>';
+    }
+  </script>
+</body>
+</html>
