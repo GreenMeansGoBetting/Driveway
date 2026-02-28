@@ -8,6 +8,23 @@ function supabaseReady() {
          !String(window.SUPABASE_ANON_KEY).includes("PASTE_");
 }
 
+function cloudGameRow(game){
+  // Only send columns that exist in Supabase games table
+  if(!game) return game;
+  return {
+    game_id: game.game_id,
+    season_id: game.season_id,
+    played_at: game.played_at || game.started_at || game.created_at || new Date().toISOString(),
+    finalized: !!game.finalized,
+    sideA_player_ids: game.sideA_player_ids || game.teamA_player_ids || [],
+    sideB_player_ids: game.sideB_player_ids || game.teamB_player_ids || [],
+    sideA_score: (game.sideA_score!=null ? game.sideA_score : (game.final_score_a!=null ? game.final_score_a : null)),
+    sideB_score: (game.sideB_score!=null ? game.sideB_score : (game.final_score_b!=null ? game.final_score_b : null)),
+    winner_side: game.winner_side || null
+  };
+}
+
+
 function sb() {
   if (!SB) {
     if (!supabaseReady()) throw new Error("Supabase config missing");
@@ -58,18 +75,23 @@ async function sbSyncDown() {
     fetchAll("events"),
   ]);
 
-  // overwrite local
-  await DB.clearPlayers();
-  await DB.clearSeasons();
-  await DB.clearGames();
-  await DB.clearEvents();
-
+  // merge into local (never wipe local on sync-down)
   for (const p of players) await DB.putPlayer(p);
   for (const s of seasons) await DB.putSeason(s);
   for (const g of games) await DB.putGame(g);
   for (const e of events) await DB.putEvent(e);
 
-  // set current season if exists
+  // prune local finalized games that no longer exist in cloud (supports deletes across devices)
+  if (games.length){
+    const cloudGameIds = new Set(games.map(g=>g.game_id));
+    const localFinal = await DB.listAllFinalizedGames();
+    for (const lg of localFinal){
+      if (!cloudGameIds.has(lg.game_id)){
+        await DB.deleteGame(lg.game_id);
+      }
+    }
+  }
+
   const current = seasons.find(x => !x.archived) || null;
   if (current) await DB.setSetting("current_season_id", current.season_id);
 
@@ -94,7 +116,7 @@ async function sbSyncUp() {
       } else if (kind === "upsert_season") {
         await sb().from("seasons").upsert({ ...payload, owner_id });
       } else if (kind === "upsert_game") {
-        await sb().from("games").upsert({ ...payload, owner_id });
+        await sb().from("games").upsert({ ...cloudGameRow(payload), owner_id });
       } else if (kind === "upsert_event") {
         await sb().from("events").upsert({ ...payload, owner_id });
       } else if (kind === "delete_game") {
@@ -105,7 +127,7 @@ async function sbSyncUp() {
         await sb().from("events").delete().eq("owner_id", owner_id).eq("event_id", payload.event_id);
       } else if (kind === "upsert_bulk_finalize") {
         // used after finalize: upsert game + all events for the game
-        await sb().from("games").upsert({ ...payload.game, owner_id });
+        await sb().from("games").upsert({ ...cloudGameRow(payload.game), owner_id });
         if (payload.events && payload.events.length) {
           const rows = payload.events.map(e => ({ ...e, owner_id }));
           await sb().from("events").upsert(rows);

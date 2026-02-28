@@ -800,6 +800,9 @@ async function renderRecap(app){
     game.finalized=true;
     game.final_score_a=box.scoreA;
     game.final_score_b=box.scoreB;
+    // canonical score fields for cloud
+    game.sideA_score=box.scoreA;
+    game.sideB_score=box.scoreB;
     game.winner_side=box.winner_side;
     await DB.putGame(game);
 
