@@ -1,11 +1,13 @@
 // Simple offline cache for core assets
-const CACHE = "driveway-stats-v1";
+const CACHE = "driveway-stats-v9-1";
 const ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
   "./db.js",
+  "./supabase_client.js",
+  "./config.js",
   "./export.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
