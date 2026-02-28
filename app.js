@@ -1730,7 +1730,7 @@ async function renderRecover(app){
     return;
   }
   if(!h.signed_in){
-    app.appendChild(el("div",{class:"card section", html:`Sign in first (Sync button) to recover.`}));
+    app.appendChild(el("div",{class:"card section", html:`Sign in first (Sync button) to recover. If you just signed in, refresh once then try again.`}));
     return;
   }
 
