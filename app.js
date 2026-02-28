@@ -403,6 +403,7 @@ async function render(){
   if(state.route==="leaderboard") return renderLeaderboard(app);
   if(state.route==="awards") return renderAwards(app);
   if(state.route==="records") return renderRecords(app);
+  if(state.route==="recover") return renderRecover(app);
   if(state.route==="draft") return renderDraft(app);
 }
 
