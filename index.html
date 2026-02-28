@@ -7,6 +7,25 @@
   <title>Driveway Stats</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="stylesheet" href="styles.css" />
+
+<script>
+  window.addEventListener('error', function(e){
+    try{
+      const msg = (e && e.message) ? e.message : 'Unknown error';
+      const pre = document.getElementById('fatalErr');
+      if (pre){ pre.style.display='block'; pre.textContent = 'JS Error: ' + msg; }
+    }catch(_){}
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    try{
+      const msg = (e && e.reason) ? (e.reason.message || String(e.reason)) : 'Unknown rejection';
+      const pre = document.getElementById('fatalErr');
+      if (pre){ pre.style.display='block'; pre.textContent = 'Promise Error: ' + msg; }
+    }catch(_){}
+  });
+</script>
+<pre id="fatalErr" style="display:none; white-space:pre-wrap; background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.35); padding:12px; border-radius:12px; margin:12px;"></pre>
+
 </head>
 <body>
   <header class="app-header">
@@ -45,16 +64,16 @@
   <div class="modal" id="modal" hidden></div>
 
   <!-- 1) Put your Supabase URL + anon key in config.js -->
-  <script src="config.js?v=9.3"></script>
+  <script src="config.v9-4.js"></script>
 
   <!-- 2) Supabase JS SDK (loaded from CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <!-- App scripts -->
-  <script src="db.js?v=9.3"></script>
-  <script src="supabase_client.js?v=9.3"></script>
-  <script src="export.js?v=9.3"></script>
-  <script src="app.js?v=9.3"></script>
+  <script src="db.v9-4.js"></script>
+  <script src="supabase_client.v9-4.js"></script>
+  <script src="export.v9-4.js"></script>
+  <script src="app.v9-4.js"></script>
 
   <script>
   // v9.3: disable service worker to prevent stale-cache issues
